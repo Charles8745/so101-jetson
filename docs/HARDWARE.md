@@ -36,11 +36,26 @@ Per-resolution the ONLY offered frame rates are:
   (stable per physical USB port). See devices.example.env.
 
 ## *** USB bandwidth: the Jetson has ONE USB 2.0 bus (480 Mbps) ***
-All four ports share it. Two cameras streaming **uncompressed YUYV 640x480@30**
-= ~294 Mbps and they collapse within ~10 s (errno 71 EPROTO, device re-enumerates).
-Neither swapping ports nor a powered hub helps -- the upstream bus is the limit.
-=> Use **MJPG** (compressed at the camera). MJPG 1024x768@30 for two cameras is
-~32-80 Mbps and fits easily. If you ever add a third camera, redo this budget.
+All four ports share it, along with both servo adapters. A USB 2.0 device lands
+on this bus whichever port it is plugged into, so **swapping ports does not help
+and neither does a powered hub** -- the upstream bus is the limit.
+
+Budget (bytes/pixel: YUYV 2.0 exactly; MJPG ~0.15 measured on these cameras):
+
+| config | per camera | two cameras |
+|---|---|---|
+| YUYV 640x480@30 | 147 Mbps | 294 Mbps |
+| MJPG 1024x768@30 | 28 Mbps | **56 Mbps** |
+
+USB 2.0 caps isochronous traffic at ~384 Mbps, so 294 is inside the spec but has
+almost no headroom. **=> Use MJPG.**
+
+⚠ **Honest limit of what we know.** The only configuration MEASURED good here is
+two cameras at MJPG 1024x768@30, 60 s, zero dropped frames. The 2026-09-05
+attempt at two YUYV 640x480@30 did collapse, but the cause was traced to a faulty
+wrist-camera cable, **not** to bandwidth (MJPG at 1/5 the data rate collapsed
+too, and sooner). So 294 Mbps is *unproven here*, not *known-bad*. Do not cite
+that run as a bandwidth result.
 
 ## *** Wrist-camera cable fault (open item) ***
 The camera mounted on the moving follower drops off the bus at certain bend

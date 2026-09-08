@@ -58,18 +58,46 @@ which reports loop rate, the per-step breakdown, and the **follow latency**
 number is the baseline Isaac (p3) and the VLA (p5) get compared against.
 
 ## 5. Program 2 -- cameras: record + live view  (owns the cameras)
-Runs in a SEPARATE terminal / process; independent of the arm.
+Separate terminal, separate process; independent of the arm.
 ```
 source devices.env
 ~/so101venv/bin/python programs/p2_record_cameras.py \
-    --cam wrist=$CAM_WRIST --cam front=$CAM_FRONT \
-    --width 1024 --height 768 --fps 30 --fourcc MJPG \
-    --out ./recordings --display on
-# press 'q' in a window, or Ctrl+C, to stop
+    --width 1024 --height 768 --fps 30 --fourcc MJPG
 ```
-Output per session in `recordings/<timestamp>/`:
-`<cam>.avi`, `<cam>_timestamps.csv`, `<cam>_faults.jsonl`, `clock_epoch.json`.
-On a headless machine use `--display off` (recording is unaffected).
+A 7-point pre-flight runs first: nodes exist, cameras are distinct, **the mode
+actually negotiated matches the one requested**, the USB bandwidth budget, a
+control dump, and a simultaneous capture probe. It also saves one frame from
+each camera (`<cam>_first.jpg`) -- see the identity note below.
+
+Stop with `q` in a window, or Ctrl+C. Output in `logs/p2/<timestamp>/`:
+`<cam>.avi`, `rows.jsonl`, `events.jsonl`, `<cam>_faults.jsonl`, `<cam>_first.jpg`.
+
+### Exposure -- matters more than it looks
+Auto-exposure is bad for a training set. When the arm enters frame the exposure
+compensates, so **background brightness becomes correlated with arm position** --
+a policy can read arm pose off the background, a cue that dies on deployment. It
+also varies exposure TIME, so frame intervals jitter and timestamps drift from
+the true sampling instants. Mains flicker (Taiwan: 60 Hz) adds banding.
+
+This program leaves the controls alone by default and just records them (it is a
+test tool -- changing settings would confuse what you are testing). For real data:
+```
+    --lock-exposure --power-line-hz 60
+```
+
+### Identity: cameras can only be bound to a PORT
+The arms carry unique USB serials, so pre-flight catches a swap. These cameras do
+not: same model, no serial in either by-id string. The only thing telling them
+apart is the physical port, which is what by-path encodes. **Move a cable to
+another port and the labels are silently wrong.** The startup snapshots are the
+remedy: here they are decisive by content -- the wrist camera sees the gripper.
+
+### Fault policy
+A camera fault does NOT stop the run: the other camera keeps recording, the
+failing one reconnects by by-path with exponential backoff, and every drop,
+reconnect and second of downtime is written to `<cam>_faults.jsonl`. The end-of-run
+summary prints the totals. **If it reports a mode change, data before and after
+are not the same exam paper** -- treat them separately.
 
 ## 6. Verify
 ```

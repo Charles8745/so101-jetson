@@ -43,8 +43,8 @@ source devices.env
 
 ## Self-test (no hardware)
 ```
-python tools/selftest.py        # 9 checks
+python tools/selftest.py        # 11 checks
 ```
 
 ## Status
-✅ p1, p2 written · ⬜ not yet run against hardware · ⬜ p3/p4/p5 and the gateway not written
+✅ p1, p2 written (pre-flight, fault policy, logging) · ⬜ neither run against hardware yet · ⬜ p3/p4/p5 and the gateway not written
