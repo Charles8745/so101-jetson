@@ -36,23 +36,32 @@ cp setup/devices.example.env devices.env
 source devices.env
 ```
 
-## 4. Program 1 -- teleoperation + signal  (owns the servo bus)
-Align the leader to roughly the follower's pose first (avoids a fast snap).
+## 4. Program 1 -- follower follows leader  (owns the servo bus)
 ```
-~/so101venv/bin/python arm/teleop_arm.py \
-    --leader-port "$LEADER" --follower-port "$FOLLOWER" \
-    --fps 30 --jsonl ./arm_signal.jsonl
-# add --udp <isaac-host>:9870 to stream to Isaac Sim
-# add --max-relative-target 5 for a cautious first run
+~/so101venv/bin/python programs/p1_follow_leader.py --fps 30
 ```
-Expect: follower tracks the leader; `arm_signal.jsonl` grows. Ctrl+C stops
-(torque is released on exit).
+It runs an 8-point pre-flight first and refuses to start if anything fails --
+including if the USB serials do not match the registry (arms swapped) or if the
+leader and follower poses disagree by more than 15 deg (would cause a fast snap).
+`--force` overrides only the pose check.
+
+**Torque policy**: a fault does NOT release torque -- the follower freezes where
+it is. Torque is released on exactly two exits: you press ENTER, or you close the
+program (Ctrl+C / SIGTERM).
+
+Logs land in `logs/p1/<timestamp>/{rows,events}.jsonl`. Then:
+```
+python tools/analyze_latency.py logs/p1/<timestamp>/rows.jsonl
+```
+which reports loop rate, the per-step breakdown, and the **follow latency**
+(how far the physical follower lags the leader, by cross-correlation). That
+number is the baseline Isaac (p3) and the VLA (p5) get compared against.
 
 ## 5. Program 2 -- cameras: record + live view  (owns the cameras)
 Runs in a SEPARATE terminal / process; independent of the arm.
 ```
 source devices.env
-~/so101venv/bin/python camera/record_cameras.py \
+~/so101venv/bin/python programs/p2_record_cameras.py \
     --cam wrist=$CAM_WRIST --cam front=$CAM_FRONT \
     --width 1024 --height 768 --fps 30 --fourcc MJPG \
     --out ./recordings --display on

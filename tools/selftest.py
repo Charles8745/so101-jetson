@@ -105,9 +105,83 @@ def test_resilient_reconnect():
     print(f"ok  resilient reconnect (reopened {st['opened']}x)")
 
 
+
+
+def test_rate_limit():
+    from arm.control import rate_limit
+    prev = {"a": 0.0, "b": 0.0}
+    out, n = rate_limit({"a": 100.0, "b": 1.0}, prev, 8.0)
+    assert out["a"] == 8.0 and out["b"] == 1.0 and n == 1, (out, n)
+    out, n = rate_limit({"a": -100.0}, {"a": 0.0}, 8.0)
+    assert out["a"] == -8.0 and n == 1
+    out, n = rate_limit({"a": 999.0}, None, 8.0)
+    assert out["a"] == 999.0 and n == 0, "first step passes through"
+    out, n = rate_limit({"a": 999.0}, prev, 0)
+    assert out["a"] == 999.0 and n == 0, "0 disables the limiter"
+    print("ok  rate_limit")
+
+
+def test_pose_diff_and_watchdog():
+    from arm.control import TrackingWatchdog, pose_diff
+    d, worst, val = pose_diff({"a": 10.0, "b": 0.0}, {"a": 1.0, "b": 0.5})
+    assert worst == "a" and abs(val - 9.0) < 1e-9, (d, worst, val)
+    w = TrackingWatchdog(tol_deg=5.0, n_strikes=3)
+    assert not w.update({"a": 0.0}, {"a": 0.0})
+    assert not w.update({"a": 100.0}, {"a": 0.0})
+    assert not w.update({"a": 100.0}, {"a": 0.0})
+    assert w.update({"a": 100.0}, {"a": 0.0}), "should trip on 3rd strike"
+    assert "tracking error" in w.reason()
+    w2 = TrackingWatchdog(tol_deg=5.0, n_strikes=3)
+    w2.update({"a": 100.0}, {"a": 0.0})
+    assert not w2.update({"a": 0.0}, {"a": 0.0}), "in-tolerance resets strikes"
+    print("ok  pose_diff + tracking watchdog")
+
+
+def test_serial_parsing():
+    from arm.preflight import parse_serial_from_byid
+    assert parse_serial_from_byid(
+        "usb-1a86_USB_Single_Serial_5B79050417-if00") == "5B79050417"
+    assert parse_serial_from_byid(
+        "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79050450-if00") == "5B79050450"
+    assert parse_serial_from_byid("/dev/ttyACM0") is None
+    print("ok  serial parsing")
+
+
+def test_best_lag():
+    import math
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    from analyze_latency import best_lag
+    a = [math.sin(i * 0.15) for i in range(400)]
+    for true_lag in (0, 3, 11):
+        b = [0.0] * true_lag + a[:len(a) - true_lag]
+        k, r = best_lag(a, b, 30)
+        assert k == true_lag, f"expected {true_lag}, got {k}"
+        assert r > 0.99
+    print("ok  cross-correlation lag")
+
+
+def test_jsonl_writer():
+    from common.jsonl import JsonlWriter
+    p = os.path.join(tempfile.mkdtemp(), "sub", "x.jsonl")
+    w = JsonlWriter(p)
+    w.write({"a": 1})
+    w.event("start", note="hi")
+    w.close()
+    lines = [json.loads(x) for x in open(p).read().strip().splitlines()]
+    assert lines[0]["a"] == 1
+    assert lines[1]["event"] == "start" and lines[1]["note"] == "hi"
+    assert "t_mono" in lines[1]
+    print("ok  jsonl writer")
+
+
 if __name__ == "__main__":
     test_clock()
     test_signal_jsonl()
     test_signal_udp()
+    test_jsonl_writer()
+    test_rate_limit()
+    test_pose_diff_and_watchdog()
+    test_serial_parsing()
+    test_best_lag()
     test_resilient_reconnect()
     print("ALL PASS")
