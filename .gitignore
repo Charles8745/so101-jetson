@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+recordings/
+*.avi
+*.mp4
+devices.env
+*.log

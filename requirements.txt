@@ -1,0 +1,9 @@
+# Installed by setup/install.sh on the target machine.
+# torch / torchvision are pulled in automatically by lerobot with the
+# platform-correct wheels (on this Jetson: torch 2.11.0+cu130). Do NOT pin torch
+# here -- the correct wheel differs per machine.
+lerobot[feetech]==0.6.1
+
+# Full OpenCV (NOT headless) -- required for the live display window (cv2.imshow).
+# install.sh removes opencv-python-headless first to avoid a two-build conflict.
+opencv-python
