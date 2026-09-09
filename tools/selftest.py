@@ -273,6 +273,328 @@ def test_resilient_reconnect():
 
 
 
+# ---------------------------------------------------------------- program 3
+def _fake_calibration():
+    ranges = {"shoulder_pan": (791, 3305), "shoulder_lift": (881, 3215),
+              "elbow_flex": (943, 3153), "wrist_flex": (874, 3222),
+              "wrist_roll": (1, 4095), "gripper": (2000, 3400)}
+    return {j: {"id": i + 1, "drive_mode": 0, "homing_offset": 0,
+                "range_min": lo, "range_max": hi}
+            for i, (j, (lo, hi)) in enumerate(ranges.items())}
+
+
+def _faithful_limits(cal, flip=()):
+    """Model limits that exactly match the arm's travel, with a non-zero zero."""
+    import math as _m
+    from arm.units import BODY_JOINTS, deg_range_from_calibration
+    out = {}
+    for k, j in enumerate(BODY_JOINTS):
+        lo_deg, hi_deg = deg_range_from_calibration(cal[j])
+        span = _m.radians(hi_deg - lo_deg)
+        a = -span / 2 + 0.1 * k
+        b = a + span
+        out[j] = [b, a] if j in flip else [a, b]
+    return out
+
+
+def test_simmap_fit_recovers_sign_and_scale():
+    import math
+    from arm.sim_mapping import build_map
+    cal = _fake_calibration()
+    from arm.sim_mapping import FIT_ENDPOINTS
+    m = build_map(cal, _faithful_limits(cal, flip=("elbow_flex",)),
+                  (0.0, 0.6109), fit_mode=FIT_ENDPOINTS,
+                  source_arm={"role": "leader", "id": "x"})
+    for j, spec in m.joints.items():
+        if spec["mode"] != "affine":
+            continue
+        # a faithful model must fit at exactly one degree per degree
+        assert abs(abs(spec["scale"]) - math.pi / 180) < 1e-9, (j, spec["scale"])
+        assert abs(spec["span_ratio"] - 1.0) < 1e-9, (j, spec["span_ratio"])
+    assert m.joints["elbow_flex"]["scale"] < 0, "a backwards model axis must " \
+        "come out as a NEGATIVE scale, not as a silently wrong mapping"
+    assert m.joints["shoulder_pan"]["scale"] > 0
+    # the gripper is percent, not degrees, and must map by range
+    assert m.joints["gripper"]["mode"] == "range"
+    q, clipped = m.apply_joint("gripper", 50.0)
+    assert abs(q - 0.30545) < 1e-4 and not clipped, q
+    print("ok  simmap fit (sign recovered, scale exact, gripper by range)")
+
+
+def test_identity_fit_beats_endpoint_fit_when_spans_disagree():
+    """Measured against the real SO-101 URDF, this is not hypothetical.
+
+    The arm's wrist_flex sweeps 206.4 deg; the URDF declares 190. An endpoint
+    fit spreads that 8.6% across every angle in between -- at mid-travel it is
+    4 degrees wrong, reports no clipping, and 8.6% sits UNDER the refusal
+    threshold, so nothing stops it. Identity maps degree for degree and clips
+    the part the model genuinely cannot reach, saying so every step.
+    """
+    import math
+    from arm.sim_mapping import FIT_ENDPOINTS, FIT_IDENTITY, build_map
+    cal = _fake_calibration()
+    urdf = {"shoulder_pan": (-1.91986, 1.91986), "shoulder_lift": (-1.74533, 1.74533),
+            "elbow_flex": (-1.69, 1.69), "wrist_flex": (-1.65806, 1.65806),
+            "wrist_roll": (-2.74385, 2.84121)}
+    arm = {"role": "leader", "id": "x"}
+    ident = build_map(cal, urdf, (-0.174533, 1.74533), source_arm=arm,
+                      fit_mode=FIT_IDENTITY)
+    ends = build_map(cal, urdf, (-0.174533, 1.74533), source_arm=arm,
+                     fit_mode=FIT_ENDPOINTS)
+
+    for j, spec in ident.joints.items():
+        if spec["mode"] == "affine":
+            assert abs(abs(spec["scale"]) - math.pi / 180) < 1e-12, j
+
+    q, clipped = ident.apply_joint("wrist_flex", 50.0)
+    assert abs(math.degrees(q) - 50.0) < 1e-9 and not clipped, math.degrees(q)
+    q2, clipped2 = ends.apply_joint("wrist_flex", 50.0)
+    err = 50.0 - math.degrees(q2)
+    assert err > 3.5 and not clipped2, (err, clipped2)
+
+    q3, clipped3 = ident.apply_joint("wrist_roll", 170.0)
+    assert clipped3 and abs(math.degrees(q3) - 162.8) < 0.1, math.degrees(q3)
+    q4, clipped4 = ends.apply_joint("wrist_roll", 170.0)
+    assert not clipped4 and 170.0 - math.degrees(q4) > 15.0, math.degrees(q4)
+
+    ok, bad = ident.guard(cal, allow_unverified=True, expect_role="leader")
+    assert ok, bad
+    ok, bad = ends.guard(cal, allow_unverified=True, expect_role="leader")
+    assert not ok and any("endpoint fit" in b for b in bad), bad
+
+    un = ident.unreachable_deg()
+    assert round(un["wrist_roll"]) == 40 and round(un["wrist_flex"]) == 16, un
+    print("ok  identity fit is exact where the endpoint fit is quietly 4 deg out")
+
+
+def test_simmap_span_check_catches_a_different_linkage():
+    from arm.sim_mapping import SPAN_FAIL, build_map
+    cal = _fake_calibration()
+    lim = _faithful_limits(cal)
+    lo, hi = lim["elbow_flex"]                       # model 15% short
+    mid, half = (lo + hi) / 2, (hi - lo) / 2 * 0.85
+    lim["elbow_flex"] = [mid - half, mid + half]
+    from arm.sim_mapping import FIT_ENDPOINTS
+    m = build_map(cal, lim, (0.0, 0.6109), fit_mode=FIT_ENDPOINTS,
+                  source_arm={"role": "leader", "id": "x"})
+    worst, wj = m.worst_span_ratio()
+    assert wj == "elbow_flex" and worst > SPAN_FAIL, (wj, worst)
+    ok, bad = m.guard(cal, allow_unverified=True, expect_role="leader")
+    assert not ok and any("span ratio" in b for b in bad), bad
+    # ... and the midpoint check that a naive implementation would use is
+    # VACUOUS here: an affine fit through two points hits their midpoint exactly.
+    q, _ = m.apply_joint("elbow_flex", 0.0)
+    mid_model = (lim["elbow_flex"][0] + lim["elbow_flex"][1]) / 2
+    assert abs(q - mid_model) < 1e-12, "midpoint residual cannot detect this"
+    print("ok  simmap span check (catches what a midpoint check cannot)")
+
+
+def test_simmap_guards_role_calibration_and_tampering():
+    from arm.sim_mapping import build_map
+    cal = _fake_calibration()
+    m = build_map(cal, _faithful_limits(cal), (0.0, 0.6109),
+                  source_arm={"role": "leader", "id": "my_leader"})
+    ok, bad = m.guard(cal, expect_role="leader")
+    assert not ok and any("not usable as verified" in b for b in bad), bad
+
+    m.doc["verified"] = {"by": "tester", "method": "visual", "note": "n",
+                         "fit_sha256": m.fit_sha256()}
+    ok, bad = m.guard(cal, expect_role="leader")
+    assert ok, bad
+
+    ok, bad = m.guard(cal, expect_role="follower")
+    assert not ok and any("fitted for" in b for b in bad), bad
+
+    del m.doc["verified"]["fit_sha256"]                  # the one-field attack
+    assert not m.is_verified(), "an unbound claim is not a verification"
+    assert "UNBOUND" in m.verification_note()
+    m.doc["verified"]["fit_sha256"] = m.fit_sha256()
+
+    m.joints["wrist_roll"]["scale"] *= 1.02              # edit after verifying
+    assert not m.is_verified(), "editing the fit must void the verification"
+    assert "STALE" in m.verification_note()
+    m.joints["wrist_roll"]["scale"] /= 1.02
+
+    moved = _fake_calibration()
+    moved["shoulder_pan"]["range_min"] += 1              # one tick
+    ok, bad = m.guard(moved, expect_role="leader")
+    assert not ok and any("degrees zero" in b for b in bad), bad
+    print("ok  simmap guards (verified / role / tamper / recalibration)")
+
+
+def test_simmap_refuses_a_map_that_cannot_move_a_joint():
+    """Two ways a joint goes missing without anything erroring."""
+    from arm.sim_mapping import build_map
+    cal = _fake_calibration()
+    lim = _faithful_limits(cal)
+
+    # (a) the joint is absent from the map entirely -> apply() skips it
+    partial = build_map(cal, {k: v for k, v in lim.items() if k != "wrist_roll"},
+                        (0.0, 0.6109), source_arm={"role": "leader", "id": "x"})
+    out, _ = partial.apply({j: 0.0 for j in cal})
+    assert "wrist_roll" not in out, "apply() silently drops unmapped joints"
+    ok, bad = partial.guard(cal, allow_unverified=True, expect_role="leader")
+    assert not ok and any("does not cover" in b for b in bad), bad
+
+    # (b) the joint is present but maps to a constant (empty gripper_rad)
+    frozen = build_map(cal, lim, (0.0, 0.0),
+                       source_arm={"role": "leader", "id": "x"})
+    a, _ = frozen.apply_joint("gripper", 0.0)
+    b, _ = frozen.apply_joint("gripper", 100.0)
+    assert a == b, "this is the failure: open and shut map to the same radian"
+    ok, bad = frozen.guard(cal, allow_unverified=True, expect_role="leader")
+    assert not ok and any("never move" in x for x in bad), bad
+    print("ok  simmap refuses maps with a joint that cannot move")
+
+
+def test_linkstats_correlates_acks_with_their_own_command():
+    """The bug the end-to-end test found: at 30 Hz the ack for step N arrives
+    during step N+1, so comparing it against the CURRENT command marks every
+    single step as a mismatch."""
+    from net.sim_protocol import LinkStats, encode_ack, encode_cmd
+    st = LinkStats()
+    cmds = []
+    for i in range(3):
+        c = encode_cmd(i, 100.0 + i, {"shoulder_pan": 0.1 * i}, "sha")
+        st.on_send(c["seq"], c["t_send_mono"], sent_rad=c["joints_rad"])
+        cmds.append(c)
+    for i, c in enumerate(cmds):                 # ack each against its OWN cmd
+        st.on_ack(encode_ack(c, c["joints_rad"], []), 100.0 + i + 0.004)
+    assert st.mismatched == 0, st.summary()
+    assert st.acked == 3 and st.lost == 0
+    assert abs(st.summary()["rtt_ms_median"] - 4.0) < 1e-6, st.summary()
+
+    st2 = LinkStats()
+    c = encode_cmd(9, 200.0, {"shoulder_pan": 0.5}, "sha")
+    st2.on_send(9, 200.0, sent_rad=c["joints_rad"])
+    st2.on_ack(encode_ack(c, {"shoulder_pan": 0.9}, []), 200.004)
+    assert st2.mismatched == 1, "the sim applying something else, undeclared, " \
+        "must be caught"
+    print("ok  linkstats correlates each ack with its own command")
+
+
+def test_linkstats_supersede_is_not_loss():
+    from net.sim_protocol import LinkStats, encode_ack, encode_cmd
+    st = LinkStats(lost_after_s=1.0)
+    for i in range(4):
+        st.on_send(i, 300.0, sent_rad={"a": 0.0})
+    c = encode_cmd(3, 300.0, {"a": 0.0}, "sha")
+    st.on_ack(encode_ack(c, {"a": 0.0}, [], superseded=[0, 1, 2]), 300.005)
+    st.expire(302.0)
+    s = st.summary()
+    assert s["superseded"] == 3 and s["lost"] == 0 and s["acked"] == 1, s
+    assert s["loss_rate"] == 0.0 and s["supersede_rate"] == 0.75, s
+
+    st2 = LinkStats(lost_after_s=1.0)
+    for i in range(4):
+        st2.on_send(i, 300.0, sent_rad={"a": 0.0})
+    st2.expire(302.0)
+    assert st2.summary()["lost"] == 4, "a genuinely unanswered command IS lost"
+    print("ok  linkstats keeps 'the sim was slow' apart from 'the net dropped it'")
+
+
+def test_linkstats_counts_a_send_that_never_left():
+    """A sendto() that fails is neither acked nor lost. Uncounted, it puts a
+    hole in the sim's motion while loss_rate still reads zero."""
+    from net.sim_protocol import LinkStats
+    st = LinkStats()
+    st.on_send(0, 100.0, sent_rad={"a": 0.0})
+    st.on_send_failed(1)
+    st.expire(200.0)
+    s = st.summary()
+    assert s["sent"] == 2 and s["send_failed"] == 1 and s["lost"] == 1, s
+    print("ok  linkstats counts a command that never reached the wire")
+
+
+def test_mismatch_tolerance_is_a_tracking_error_not_an_epsilon():
+    """Against real Isaac the ack carries MEASURED joint positions, which never
+    land exactly on the target. A 1e-6 tolerance would flag every step and the
+    warning would be trained out of the operator within a day."""
+    from net.sim_protocol import LinkStats, encode_ack, encode_cmd
+    st = LinkStats(mismatch_tol_rad=0.10)
+    c = encode_cmd(0, 1.0, {"shoulder_pan": 1.0}, "sha")
+    st.on_send(0, 1.0, sent_rad=c["joints_rad"])
+    st.on_ack(encode_ack(c, {"shoulder_pan": 1.008}, []), 1.01)   # normal lag
+    assert st.mismatched == 0, "8 mrad of tracking error is not a wrong map"
+
+    c = encode_cmd(1, 2.0, {"shoulder_pan": 1.0}, "sha")
+    st.on_send(1, 2.0, sent_rad=c["joints_rad"])
+    st.on_ack(encode_ack(c, {"shoulder_pan": -0.4}, []), 2.01)    # wrong sign
+    assert st.mismatched == 1, "a flipped axis must still be caught"
+    s = st.summary()
+    assert abs(s["max_dev_deg"] - 80.21) < 0.1, s
+    assert s["max_dev_joint"] == "shoulder_pan"
+    print("ok  mismatch tolerance is sized to catch a wrong map, not lag")
+
+
+def test_ctl_tracker_retransmits_then_gives_up():
+    from net.sim_protocol import CtlTracker, encode_ctl_ack
+    t = CtlTracker(timeout_s=0.1, max_tries=3)
+    seq, msg = t.start("episode_start", episode=1)
+    assert len(t.due(0.0)) == 1 and not t.due(0.0), "no resend before timeout"
+    assert len(t.due(0.15)) == 1 and len(t.due(0.30)) == 1
+    assert t.due(0.45) == [] and t.is_settled(seq), "must give up after max_tries"
+    ok, detail = t.result(seq)
+    assert ok is False and "no ack" in detail, detail
+
+    t2 = CtlTracker(timeout_s=0.1, max_tries=5)
+    seq2, msg2 = t2.start("episode_end", episode=2)
+    t2.due(0.0)
+    t2.on_ack(encode_ctl_ack(msg2, True, "saved"))
+    assert t2.result(seq2) == (True, "saved") and t2.due(1.0) == []
+    print("ok  ctl tracker (retransmit until acked, then fail loudly)")
+
+
+def test_receiver_ctl_cache_is_per_sender_and_per_run():
+    """Two ways the idempotency cache can answer the wrong question.
+
+    (a) Every operator's CtlTracker starts at ctl_seq 1, so a cache keyed on the
+        sequence alone hands a SECOND operator the first one's 'you are the
+        owner' ack -- they see 'connected' and drive nothing.
+    (b) p3 binds a fixed source port and also starts at ctl_seq 1, so a
+        RESTARTED p3 is byte-for-byte a retransmission of the old one. Without
+        the run nonce the receiver replays 'episode 1 started' and 'episode 1
+        ended', p3 prints KEPT, and the sim recorded nothing at all.
+    """
+    src = open(os.path.join(ROOT, "sim", "receiver.py")).read()
+    assert "key = (src, sess, seq)" in src and "self.seen_ctl[key]" in src, \
+        "seen_ctl must be keyed by sender AND run AND sequence"
+    assert "if seq in self.seen_ctl" not in src
+
+    from net.sim_protocol import CtlTracker, encode_ctl, encode_ctl_ack
+    a, b = CtlTracker(), CtlTracker()
+    assert a.session != b.session, "each run needs its own nonce"
+    sa, ma = a.start("episode_start", episode=1)
+    sb, mb = b.start("episode_start", episode=1)
+    assert sa == sb == 1, "the sequence alone cannot tell the runs apart"
+    assert ma["session"] != mb["session"], "the nonce can"
+
+    # b's ack must not settle a's request
+    a.due(0.0)
+    assert a.on_ack(encode_ctl_ack(mb, True, "ok")) is None
+    assert a.result(sa) == (None, "pending") and a.rejected == 1
+    # nor may an ack for a different episode
+    a.on_ack(encode_ctl_ack(encode_ctl(1, "episode_start", session=a.session,
+                                       episode=7), True, "ok"))
+    assert a.result(sa) == (None, "pending"), "wrong episode must be rejected"
+    # the right one settles it
+    a.on_ack(encode_ctl_ack(ma, True, "started"))
+    assert a.result(sa) == (True, "started")
+    print("ok  ctl cache and acks are per sender, per run, per question")
+
+
+def test_echo_backend_clips_and_reports():
+    from sim.backend import make_backend
+    b = make_backend("echo", limits_rad={"shoulder_pan": (-1.0, 1.0)})
+    applied, clipped = b.apply({"shoulder_pan": 2.0, "elbow_flex": 0.3})
+    assert applied["shoulder_pan"] == 1.0 and clipped == ["shoulder_pan"]
+    assert applied["elbow_flex"] == 0.3
+    assert b.readback is False, "echo must never claim to read back real state"
+    ok, _ = b.on_episode("start", 1)
+    assert ok and b.episodes == [("start", 1)]
+    print("ok  echo backend (clips, and is honest about not reading back)")
+
+
 if __name__ == "__main__":
     test_clock()
     test_signal_jsonl()
@@ -287,4 +609,16 @@ if __name__ == "__main__":
     test_camera_bandwidth_budget()
     test_camera_controls()
     test_resilient_reconnect()
+    test_simmap_fit_recovers_sign_and_scale()
+    test_identity_fit_beats_endpoint_fit_when_spans_disagree()
+    test_simmap_span_check_catches_a_different_linkage()
+    test_simmap_guards_role_calibration_and_tampering()
+    test_simmap_refuses_a_map_that_cannot_move_a_joint()
+    test_linkstats_correlates_acks_with_their_own_command()
+    test_linkstats_supersede_is_not_loss()
+    test_linkstats_counts_a_send_that_never_left()
+    test_mismatch_tolerance_is_a_tracking_error_not_an_epsilon()
+    test_ctl_tracker_retransmits_then_gives_up()
+    test_receiver_ctl_cache_is_per_sender_and_per_run()
+    test_echo_backend_clips_and_reports()
     print("ALL PASS")
