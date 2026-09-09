@@ -38,9 +38,15 @@ collapsing. The cameras never notice.
 Live display is best-effort. If no GUI is available it switches off and
 RECORDING CONTINUES. Display must never be able to stop a recording.
 
-Exposure is left on AUTO by default. --lock-exposure is kept for datasets:
-auto exposure varies the exposure TIME, so under changing light the real frame
-interval moves and the brightness drifts across a recording.
+Exposure is set to AUTO by default -- set, not merely left alone. V4L2 controls
+belong to the DEVICE, so a run that locked the exposure leaves the camera locked
+for every run after it, with nothing in the later logs to say so. Mains
+frequency (--power-line-hz) is a separate setting and no longer drags the
+exposure lock along with it. --exposure lock is what a dataset wants: auto
+exposure varies the exposure TIME, so the real frame interval moves and the
+brightness drifts across a recording -- and when the arm enters frame the
+background brightness starts tracking the arm's pose, which is a cue a policy
+will happily learn and which will not survive deployment.
 """
 import argparse
 import os
@@ -244,9 +250,15 @@ def build_args():
     ap.add_argument("--display", choices=["on", "off"], default="on")
     ap.add_argument("--display-scale", type=float, default=0.5)
     ap.add_argument("--duration", type=float, default=0.0, help="0 = until q/Enter")
+    ap.add_argument("--exposure", choices=["auto", "lock", "leave"],
+                    default="auto",
+                    help="auto (default): explicitly restore auto exposure and "
+                         "auto white balance -- V4L2 controls are DEVICE state, "
+                         "so a previous locked run would otherwise carry over "
+                         "silently. lock: pin them (what a dataset wants). "
+                         "leave: touch nothing, whatever the camera already has")
     ap.add_argument("--lock-exposure", action="store_true",
-                    help="turn OFF auto exposure and auto white balance. Auto is "
-                         "the default here; datasets should lock it")
+                    help="deprecated spelling of --exposure lock")
     ap.add_argument("--exposure-time", type=int, default=None)
     ap.add_argument("--white-balance", type=int, default=None)
     ap.add_argument("--power-line-hz", type=int, default=None,
@@ -333,14 +345,26 @@ def main():
         leader.connect(calibrate=False)
         follower.connect(calibrate=False)
 
-    if args.lock_exposure or args.power_line_hz is not None:
-        for name, dev in cams:
-            steps = camctl.lock_exposure(dev, args.exposure_time,
-                                         args.white_balance, args.power_line_hz)
-            events.event("lock_exposure", cam=name, steps=steps)
-            for s in steps:
-                print(f"[p2] {name}: {'ok ' if s['ok'] else 'FAIL'} {s['step']}"
-                      + (f"  {s['detail']}" if s["detail"] else ""))
+    # Exposure and mains frequency are INDEPENDENT. Asking for anti-flicker
+    # used to lock the exposure as a side effect, so there was no way to have
+    # one without the other -- and because V4L2 controls live on the device,
+    # that lock then survived into every later run.
+    mode = "lock" if args.lock_exposure else args.exposure
+    for name, dev in cams:
+        steps = []
+        if mode == "lock":
+            steps += camctl.lock_exposure(dev, args.exposure_time,
+                                          args.white_balance)
+        elif mode == "auto":
+            steps += camctl.unlock_exposure(dev)
+        if args.power_line_hz is not None:
+            steps += camctl.set_power_line(dev, args.power_line_hz)
+        if not steps:
+            continue
+        events.event("camera_controls", cam=name, mode=mode, steps=steps)
+        for st in steps:
+            print(f"[p2] {name}: {'ok ' if st['ok'] else 'FAIL'} {st['step']}"
+                  + (f"  {st['detail']}" if st["detail"] else ""))
 
     writer_fourcc = cv2.VideoWriter_fourcc(*"MJPG")
     rc, writers, counts = {}, {}, {}

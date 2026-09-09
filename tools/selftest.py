@@ -82,6 +82,42 @@ def test_rate_limit():
     print("ok  rate_limit")
 
 
+def test_exposure_and_mains_frequency_are_independent():
+    """Asking for anti-flicker must not lock the exposure as a side effect, and
+    "auto" must be SET rather than assumed: V4L2 controls live on the device, so
+    a previous locked run carries over into every later run silently."""
+    import inspect
+    from camera import controls as cc
+    assert "power_line_hz" not in inspect.signature(cc.lock_exposure).parameters, \
+        "lock_exposure must not also set the mains frequency"
+    assert hasattr(cc, "set_power_line") and hasattr(cc, "unlock_exposure")
+    src = open(os.path.join(ROOT, "programs", "p2_record_cameras.py")).read()
+    assert "args.lock_exposure or args.power_line_hz is not None" not in src, \
+        "p2 must not trigger the exposure lock from --power-line-hz"
+    assert "camctl.unlock_exposure(dev)" in src, \
+        "p2 must actively restore auto, not just decline to lock"
+
+    calls = []
+    cc_set = cc.set_ctrl
+    cc_list = cc.list_controls
+    cc.list_controls = lambda d: ({"auto_exposure": {"value": 1, "default": 3},
+                                   "white_balance_automatic": {"value": 0,
+                                                               "default": 1},
+                                   "power_line_frequency": {"value": 0,
+                                                            "default": 2}}, None)
+    cc.set_ctrl = lambda d, n, v: (calls.append((n, v)) or (True, ""))
+    try:
+        cc.unlock_exposure("/dev/null")
+        assert calls == [("auto_exposure", 3),
+                         ("white_balance_automatic", 1)], calls
+        calls.clear()
+        cc.set_power_line("/dev/null", 60)
+        assert calls == [("power_line_frequency", 2)], calls
+    finally:
+        cc.set_ctrl, cc.list_controls = cc_set, cc_list
+    print("ok  exposure and mains frequency are separate, auto is set not assumed")
+
+
 def test_watchdog_arming_must_not_mix_units():
     """Arming with `worst_gap <= max(tolerances)` looks equivalent to asking
     "is tracking good" and is not: max() of the per-joint tolerances is the
@@ -628,6 +664,7 @@ if __name__ == "__main__":
     test_signal_udp()
     test_jsonl_writer()
     test_rate_limit()
+    test_exposure_and_mains_frequency_are_independent()
     test_watchdog_arming_must_not_mix_units()
     test_rate_limit_first_step_is_the_dangerous_one()
     test_pose_diff_and_watchdog()

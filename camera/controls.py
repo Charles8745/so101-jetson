@@ -33,6 +33,11 @@ ALIASES = {
 
 # v4l2 menu value for manual exposure is 1 in both the old and new control
 MANUAL_EXPOSURE = 1
+# UVC's menu is 0 auto / 1 manual / 2 shutter priority / 3 aperture priority,
+# and most webcams expose "auto" as 3 rather than 0. But we do not assume that:
+# restoring auto reads the control's OWN default and writes that back. This is
+# only the fallback for a device that reports no default.
+AUTO_EXPOSURE_FALLBACK = 3
 
 _LINE = re.compile(r"^\s*(\w+)\s+0x[0-9a-fA-F]+\s+\((\w+)\)\s*:\s*(.*)$")
 
@@ -94,12 +99,69 @@ def set_ctrl(device, name, value):
     return True, ""
 
 
-def lock_exposure(device, exposure_time=None, white_balance=None,
-                  power_line_hz=None):
+def set_power_line(device, power_line_hz):
+    """Mains frequency only. NOTHING else.
+
+    This used to be a parameter of lock_exposure(), which meant asking for
+    anti-flicker silently locked the exposure and the white balance too --
+    there was no way to have one without the other. They are unrelated
+    settings: flicker is about the light source, exposure is about the sensor.
+    """
+    ctrls, err = list_controls(device)
+    if err:
+        return [{"step": "list_controls", "ok": False, "detail": err}]
+    n = resolve(ctrls, "power_line_frequency")
+    if not n:
+        return [{"step": "power_line_frequency", "ok": False,
+                 "detail": "control not offered by this camera"}]
+    v = {50: 1, 60: 2, 0: 0}.get(power_line_hz)
+    if v is None:
+        return [{"step": "power_line_frequency", "ok": False,
+                 "detail": f"unsupported {power_line_hz} Hz"}]
+    ok, detail = set_ctrl(device, n, v)
+    return [{"step": f"{n}={v} ({power_line_hz} Hz)", "ok": ok, "detail": detail}]
+
+
+def unlock_exposure(device):
+    """Put auto exposure and auto white balance back.
+
+    ** V4L2 controls are DEVICE state, not process state. ** A run that locked
+    the exposure leaves the camera locked -- the next run inherits it, and every
+    run after that, until someone unplugs the camera. Nothing in a later log
+    would say so, which is exactly how two days of episodes end up with
+    different exposure settings and no record of it. So "auto" is something we
+    SET, not something we assume by not asking.
+
+    The value written is the control's own reported DEFAULT, because what "auto"
+    means in the menu differs between cameras.
+    """
+    steps = []
+    ctrls, err = list_controls(device)
+    if err:
+        return [{"step": "list_controls", "ok": False, "detail": err}]
+    for logical, fallback in (("auto_exposure", AUTO_EXPOSURE_FALLBACK),
+                              ("auto_white_balance", 1)):
+        n = resolve(ctrls, logical)
+        if not n:
+            steps.append({"step": logical, "ok": False,
+                          "detail": "control not offered by this camera"})
+            continue
+        dflt = ctrls[n].get("default")
+        v = int(dflt) if dflt is not None else fallback
+        ok, detail = set_ctrl(device, n, v)
+        steps.append({"step": f"{n}={v} (auto"
+                             + ("" if dflt is not None else ", assumed") + ")",
+                      "ok": ok, "detail": detail})
+    return steps
+
+
+def lock_exposure(device, exposure_time=None, white_balance=None):
     """Turn OFF auto exposure / auto white balance, then optionally pin values.
 
     Order matters: the manual controls are flagged inactive while auto is on,
     so auto must be disabled first.
+
+    Mains frequency is NOT set here -- see set_power_line().
     Returns a list of {step, ok, detail} for the event log.
     """
     steps = []
@@ -136,15 +198,6 @@ def lock_exposure(device, exposure_time=None, white_balance=None,
             ok, detail = set_ctrl(device, n, white_balance)
             steps.append({"step": f"{n}={white_balance}", "ok": ok,
                           "detail": detail})
-    if power_line_hz is not None:
-        n = resolve(ctrls, "power_line_frequency")
-        if n:
-            # menu: 0 disabled, 1 = 50 Hz, 2 = 60 Hz (Taiwan is 60)
-            v = {50: 1, 60: 2, 0: 0}.get(power_line_hz)
-            if v is not None:
-                ok, detail = set_ctrl(device, n, v)
-                steps.append({"step": f"{n}={v} ({power_line_hz} Hz)",
-                              "ok": ok, "detail": detail})
     return steps
 
 
