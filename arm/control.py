@@ -86,6 +86,27 @@ class TrackingWatchdog:
         self.worst_value = 0.0
         self.worst_tol = None
 
+    def in_tolerance(self, commanded, measured):
+        """Is every joint within ITS OWN tolerance right now?
+
+        Callers need this to decide when to ARM the watchdog -- the follower is
+        legitimately behind while it walks to the leader, and a fault during
+        that catch-up means nothing. Doing it by hand as
+        `worst_gap <= max(tolerances)` looks equivalent and is not: the worst
+        gap is over all joints, and max() of the tolerances is the GRIPPER's,
+        which is a percentage. That compares five joints' degrees against a
+        percentage and arms far too late (or, with a small gripper tolerance,
+        far too early). Same unit trap as everywhere else in this file.
+        """
+        for k, c in commanded.items():
+            m = measured.get(k)
+            lim = _limit_for(self.tol, k)
+            if m is None or lim is None:
+                continue
+            if abs(c - m) > lim:
+                return False
+        return True
+
     def update(self, commanded, measured):
         """Returns True when the watchdog trips."""
         over_joint, over_val, over_tol = None, 0.0, None

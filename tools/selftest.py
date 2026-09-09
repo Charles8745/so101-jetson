@@ -82,6 +82,33 @@ def test_rate_limit():
     print("ok  rate_limit")
 
 
+def test_watchdog_arming_must_not_mix_units():
+    """Arming with `worst_gap <= max(tolerances)` looks equivalent to asking
+    "is tracking good" and is not: max() of the per-joint tolerances is the
+    GRIPPER's, which is a percentage, so five joints' degrees get compared
+    against it."""
+    from arm.control import TrackingWatchdog
+    from arm.units import per_joint
+    tol = per_joint(25.0, 30.0)          # 25 deg body, 30 percent gripper
+    w = TrackingWatchdog(tol, 15)
+    cmd = {"shoulder_pan": 0.0, "gripper": 0.0}
+
+    meas = {"shoulder_pan": 28.0, "gripper": 0.0}     # 28 deg out, over its 25
+    assert not w.in_tolerance(cmd, meas), "28 deg is over the 25 deg tolerance"
+    worst = max(abs(cmd[k] - meas[k]) for k in cmd)
+    assert worst <= max(tol.values()), \
+        "...but the naive test would have called this in tolerance, because " \
+        "it compares 28 degrees against the gripper's 30 percent"
+
+    assert w.in_tolerance(cmd, {"shoulder_pan": 20.0, "gripper": 25.0})
+    assert not w.in_tolerance(cmd, {"shoulder_pan": 0.0, "gripper": 31.0})
+    for src in ("programs/p1_follow_leader.py", "programs/p2_record_cameras.py"):
+        body = open(os.path.join(ROOT, src)).read()
+        assert "in_tolerance(cmd, meas)" in body, src
+        assert "max(args.track_tol_deg" not in body, src
+    print("ok  watchdog arming asks each joint about its own tolerance")
+
+
 def test_rate_limit_first_step_is_the_dangerous_one():
     """rate_limit() passes a joint straight through when it has no previous
     command for it. That makes the FIRST step unclamped -- and step one is
@@ -601,6 +628,7 @@ if __name__ == "__main__":
     test_signal_udp()
     test_jsonl_writer()
     test_rate_limit()
+    test_watchdog_arming_must_not_mix_units()
     test_rate_limit_first_step_is_the_dangerous_one()
     test_pose_diff_and_watchdog()
     test_units_are_not_all_degrees()

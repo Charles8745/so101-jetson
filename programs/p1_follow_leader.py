@@ -200,8 +200,7 @@ def main():
             seq += 1
 
             if not watchdog_armed:
-                _, _, gap = pose_diff(cmd, meas)
-                if gap <= max(args.track_tol_deg, args.track_tol_gripper_pct):
+                if watchdog.in_tolerance(cmd, meas):
                     watchdog_armed = True
                     events.event("watchdog_armed", seq=seq)
             elif watchdog.update(cmd, meas):

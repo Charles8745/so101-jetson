@@ -12,8 +12,8 @@ this one. Keep the boundary: **drivers here, the pipeline seam there.**
 
 | layer | program | owns hardware | network |
 |---|---|---|---|
-| **0 · local, direct** | `programs/p1_follow_leader.py` — follower follows leader | itself | none |
-| | `programs/p2_record_cameras.py` — record + live view | itself | none |
+| **0 · local, direct** | `programs/p1_follow_leader.py` — the arm alone | itself | none |
+| | `programs/p2_record_cameras.py` — arm **and** cameras at once, uncoupled | itself | none |
 | | `programs/p4_collect_real.py` — real teleop + multi-cam dataset ⬜ | itself | none |
 | **1 · gateway** | `programs/p3_teleop_sim.py` — real leader drives Isaac's virtual SO-101 | leader only | Jetson→Spark, UDP |
 | | `net/so101_host.py` — resident service ⬜ | **exclusive** | ZMQ |
@@ -27,6 +27,25 @@ the picture entirely.
 ★ **Layer 0 must never go through the network.** Programs 1 and 2 exist to
 validate hardware; put a transport under them and a failure can no longer be
 attributed to the arm rather than the link.
+
+Each layer-0 program answers a different question, and the difference is the
+point:
+
+| | asks |
+|---|---|
+| **p1** | does the arm work? |
+| **p2** | does running the arm and the cameras together degrade either of them? |
+| **p2 `--no-arm`** | do the cameras work? — reach for this when a camera misbehaves: no arm, no threads of ours, nothing else to blame |
+| **p4** ⬜ | collect a dataset: episodes, one shared timeline, a gap spoils the episode |
+
+p2 runs the arm loop and every camera in their own threads, sharing nothing and
+unable to stop each other. It records two INDEPENDENT streams and reports on
+each; it does not join them onto one timeline and it does not throw anything
+away, because there is no episode here to spoil — that is p4's job. What p2
+measures is whether the isolation actually holds: its arm-loop rate and
+per-step timing are logged exactly as p1 logs them, so the two runs compare
+directly. Verified against fake devices — with a camera dropping out, and with
+the arm faulting, the other stream's rate did not move.
 
 ★ **Only one thing may own the servo bus at a time.** When the host is running,
 the layer-0 programs cannot open the port — and must say so in those words.
@@ -57,7 +76,8 @@ python tools/loopback_test.py --sim-fps 10     # ... with a simulator that lags
 ## Status
 | | |
 |---|---|
-| p1, p2 | written — pre-flight, fault policy, logging. **Not yet run against hardware.** |
+| p1 | **run on hardware 2026-09-09.** 30/60/120 Hz; loop 2.7 ms; follow latency ~105 ms at 120 Hz, and it does not improve with loop rate — it is the servo, not our sampling |
+| p2 | rewritten as arm + cameras in isolated threads. Threading verified against fake devices; **not yet run on hardware** |
 | p3 | written, adversarially reviewed, tested end to end over real UDP with an echo backend. **Arm and Isaac still untested.** |
 | `sim/isaac_adapter.py` | written, **never run** — needs Spark's Isaac version |
 | p4, p5, gateway | not started |
