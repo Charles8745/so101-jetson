@@ -226,6 +226,10 @@ def build_args():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cam", action="append", default=[],
                     help="NAME=BYPATH ; repeatable. Defaults to CAM_WRIST/CAM_FRONT")
+    ap.add_argument("--rotate", action="append", default=[],
+                    help="NAME=DEG (0/90/180/270) ; repeatable. Defaults to "
+                         "ROTATE_<NAME> in the environment. Applied at the "
+                         "SOURCE, so the file and the live view agree")
     ap.add_argument("--width", type=int, default=1024)
     ap.add_argument("--height", type=int, default=768)
     ap.add_argument("--fps", type=int, default=30, help="camera rate")
@@ -278,6 +282,17 @@ def main():
                 cams.append((nm, os.environ[env]))
     if not cams:
         ap.error("no cameras: pass --cam NAME=BYPATH or set CAM_WRIST/CAM_FRONT")
+
+    rot = {}
+    for spec in args.rotate:
+        n, d = spec.split("=", 1)
+        rot[n.strip()] = int(d)
+    for name, _dev in cams:
+        if name not in rot:
+            rot[name] = int(os.environ.get(f"ROTATE_{name.upper()}", 0))
+    bad = {n: d for n, d in rot.items() if d % 360 not in (0, 90, 180, 270)}
+    if bad:
+        ap.error(f"--rotate must be 0/90/180/270: {bad}")
     use_arm = not args.no_arm
     if use_arm and not (args.leader_port and args.follower_port):
         ap.error("need LEADER/FOLLOWER (source devices.env), or pass --no-arm")
@@ -289,10 +304,15 @@ def main():
     events = JsonlWriter(os.path.join(run_dir, "events.jsonl"))
     events.event("start", argv=sys.argv[1:], epoch=epoch(), run_dir=run_dir,
                  cams=dict(cams), arm=use_arm, arm_fps=args.arm_fps,
+                 rotate=rot,
                  mode={"width": args.width, "height": args.height,
                        "fps": args.fps, "fourcc": args.fourcc})
     print(f"[p2] logging to {run_dir}")
     print(f"[p2] {len(cams)} camera(s)" + ("" if use_arm else " -- ARM DISABLED"))
+    for name, _dev in cams:
+        if rot[name]:
+            print(f"[p2] {name}: rotated {rot[name]} deg at the source "
+                  f"-- the recording and the live view both get it")
 
     leader = follower = None
     if use_arm:
@@ -367,14 +387,18 @@ def main():
                   + (f"  {st['detail']}" if st["detail"] else ""))
 
     writer_fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-    rc, writers, counts = {}, {}, {}
+    rc, writers, counts, out_size = {}, {}, {}, {}
     for name, dev in cams:
-        rc[name] = ResilientCamera(
+        cam = ResilientCamera(
             name, dev, args.width, args.height, args.fps, fourcc=args.fourcc,
-            fault_log=os.path.join(run_dir, f"{name}_faults.jsonl")).start()
+            rotate=rot[name],
+            fault_log=os.path.join(run_dir, f"{name}_faults.jsonl"))
+        rc[name] = cam.start()
+        # 90 and 270 swap the frame's width and height; a writer sized for the
+        # sensor's mode would silently write nothing.
+        out_size[name] = cam.out_size()
         writers[name] = cv2.VideoWriter(os.path.join(run_dir, f"{name}.avi"),
-                                        writer_fourcc, args.fps,
-                                        (args.width, args.height))
+                                        writer_fourcc, args.fps, out_size[name])
         counts[name] = 0
     time.sleep(1.0)
     events.event("controls_after_open",
@@ -416,8 +440,8 @@ def main():
                          "stale_s": (round(stale, 4) if stale != float("inf")
                                      else None)}
                 if frame is not None:
-                    if (frame.shape[1], frame.shape[0]) != (args.width, args.height):
-                        frame = cv2.resize(frame, (args.width, args.height))
+                    if (frame.shape[1], frame.shape[0]) != out_size[name]:
+                        frame = cv2.resize(frame, out_size[name])
                     writers[name].write(frame)
                     entry["idx"] = counts[name]
                     counts[name] += 1

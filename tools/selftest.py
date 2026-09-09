@@ -82,6 +82,40 @@ def test_rate_limit():
     print("ok  rate_limit")
 
 
+def test_camera_rotation_is_applied_at_the_source():
+    """A camera mounted upside down is corrected in the capture thread, so the
+    video file and the live view get the same picture. Correcting it only at
+    display leaves the RECORDING upside down, which nobody notices until a
+    policy is trained on it. 90/270 also swap the frame size, so the writer has
+    to be sized for the output, not for the sensor mode."""
+    import numpy as np
+    from camera.resilient_camera import ResilientCamera
+    c0 = ResilientCamera("a", "/dev/null", 1024, 768, 30, rotate=0)
+    c180 = ResilientCamera("b", "/dev/null", 1024, 768, 30, rotate=180)
+    c90 = ResilientCamera("c", "/dev/null", 1024, 768, 30, rotate=90)
+    assert c0.out_size() == (1024, 768)
+    assert c180.out_size() == (1024, 768)
+    assert c90.out_size() == (768, 1024), "90 deg swaps width and height"
+    try:
+        ResilientCamera("d", "/dev/null", 640, 480, 30, rotate=45)
+        raise AssertionError("45 deg should be refused")
+    except ValueError:
+        pass
+
+    f = np.zeros((4, 6, 3), dtype=np.uint8)
+    f[0, 0] = (1, 2, 3)
+    import cv2 as _cv
+    r = _cv.rotate(f, _cv.ROTATE_180)
+    assert tuple(r[-1, -1]) == (1, 2, 3), "180 puts the corner opposite"
+
+    src = open(os.path.join(ROOT, "camera", "resilient_camera.py")).read()
+    assert "frame = cv2.rotate(frame, self._rot)" in src, \
+        "rotation must happen in the capture loop, not at display"
+    p2 = open(os.path.join(ROOT, "programs", "p2_record_cameras.py")).read()
+    assert "out_size[name]" in p2, "the writer must be sized for the OUTPUT"
+    print("ok  camera rotation is applied at the source, and resizes the writer")
+
+
 def test_exposure_and_mains_frequency_are_independent():
     """Asking for anti-flicker must not lock the exposure as a side effect, and
     "auto" must be SET rather than assumed: V4L2 controls live on the device, so
@@ -279,12 +313,29 @@ def test_camera_controls():
 
 
 def test_resilient_reconnect():
+    # This test swaps a fake cv2 into sys.modules and then imports
+    # camera.resilient_camera. That only works if the module has NOT already
+    # been imported -- otherwise `from ... import` hands back the cached module,
+    # still bound to the real cv2, and the fake is silently ignored. It used to
+    # rely on being the first test to touch it, which is not a property a test
+    # should depend on. So: evict the module, install the fake, import fresh,
+    # and put everything back afterwards.
+    real_cv2 = sys.modules.get("cv2")
+    cached = {k: v for k, v in sys.modules.items()
+              if k == "camera.resilient_camera"}
+    for k in cached:
+        del sys.modules[k]
+
     fake = types.ModuleType("cv2")
     fake.CAP_V4L2 = 200
     fake.CAP_PROP_FOURCC = 6
     fake.CAP_PROP_FRAME_WIDTH = 3
     fake.CAP_PROP_FRAME_HEIGHT = 4
     fake.CAP_PROP_FPS = 5
+    fake.ROTATE_90_CLOCKWISE = 0
+    fake.ROTATE_180 = 1
+    fake.ROTATE_90_COUNTERCLOCKWISE = 2
+    fake.rotate = lambda f, code: f
     fake.VideoWriter_fourcc = lambda *a: 0
     st = {"reads": 0, "opened": 0}
 
@@ -329,6 +380,12 @@ def test_resilient_reconnect():
     assert rc.stats["total_down_s"] > 0, rc.stats
     assert rc.stats["dropped"] > 0, rc.stats
     assert rc.stats["mode_changes"] == 0, "mode was stable; must not report a change"
+    if real_cv2 is not None:
+        sys.modules["cv2"] = real_cv2
+    else:
+        sys.modules.pop("cv2", None)
+    sys.modules.pop("camera.resilient_camera", None)
+    sys.modules.update(cached)
     assert rc.mode["width"] == 1024 and rc.mode["fourcc"] == "MJPG", rc.mode
     print(f"ok  resilient reconnect ({rc.stats['reconnects']} reconnects, "
           f"{rc.stats['total_down_s']:.2f}s down, mode {rc.mode['fourcc']} "
@@ -664,6 +721,7 @@ if __name__ == "__main__":
     test_signal_udp()
     test_jsonl_writer()
     test_rate_limit()
+    test_camera_rotation_is_applied_at_the_source()
     test_exposure_and_mains_frequency_are_independent()
     test_watchdog_arming_must_not_mix_units()
     test_rate_limit_first_step_is_the_dangerous_one()

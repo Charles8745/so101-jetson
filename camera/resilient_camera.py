@@ -30,14 +30,31 @@ def _fourcc_str(v):
     return "".join(chr((int(v) >> (8 * i)) & 0xFF) for i in range(4)).strip("\x00")
 
 
+# A camera bolted on upside down is a mounting fact, not an image-processing
+# choice. It is corrected HERE, at the source, so every consumer -- the video
+# file, the live view, and whatever p4 records later -- sees the same thing.
+# Correcting it only at display time is the trap: the recording stays upside
+# down and nobody finds out until a policy is trained on it.
+_ROTATIONS = {0: None,
+              90: cv2.ROTATE_90_CLOCKWISE,
+              180: cv2.ROTATE_180,
+              270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+
+
 class ResilientCamera:
     def __init__(self, name, device, width, height, fps, fourcc="MJPG",
                  fault_log=None, reconnect_backoff=(0.2, 2.0),
-                 max_read_fail=30, log_every_n_attempts=10):
+                 max_read_fail=30, log_every_n_attempts=10, rotate=0):
         self.name = name
         self.device = device
         self.width, self.height, self.fps = width, height, fps
         self.fourcc = fourcc
+        rotate = int(rotate) % 360
+        if rotate not in _ROTATIONS:
+            raise ValueError(f"{name}: rotate must be 0, 90, 180 or 270, "
+                             f"not {rotate}")
+        self.rotate = rotate
+        self._rot = _ROTATIONS[rotate]
         self._cap = None
         self._frame = None
         self._frame_mono = 0.0
@@ -76,6 +93,12 @@ class ResilientCamera:
                 "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
                 "fps": round(float(cap.get(cv2.CAP_PROP_FPS)), 3),
                 "fourcc": _fourcc_str(cap.get(cv2.CAP_PROP_FOURCC))}
+        # The negotiated mode is what the SENSOR gives; rotation is ours, and by
+        # 90/270 it swaps the frame's width and height. Record both so a mode
+        # change is compared against the sensor, not against our output.
+        mode["rotate"] = self.rotate
+        mode["out_width"], mode["out_height"] = self.out_size(
+            mode["width"], mode["height"])
         if self.mode is None:
             self.mode = mode
         elif mode != self.mode:
@@ -83,6 +106,12 @@ class ResilientCamera:
             self._log("mode_changed", was=self.mode, now=mode)
             self.mode = mode
         return cap
+
+    def out_size(self, w=None, h=None):
+        """Frame size AFTER rotation -- what a VideoWriter must be sized for."""
+        w = self.width if w is None else w
+        h = self.height if h is None else h
+        return (h, w) if self.rotate in (90, 270) else (w, h)
 
     def start(self):
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -121,6 +150,8 @@ class ResilientCamera:
 
             ok, frame = self._cap.read()
             if ok:
+                if self._rot is not None:
+                    frame = cv2.rotate(frame, self._rot)
                 with self._lock:
                     self._frame = frame
                     self._frame_mono = time.monotonic()
