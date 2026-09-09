@@ -55,9 +55,22 @@ breaks JetPack's pinned CUDA/L4T stack.
 `newgrp dialout` is not optional — without it every serial open fails with a
 permission error that looks like a broken cable.
 
-> On the original Jetson the virtualenv is `~/step0venv`, made by hand before
-> `install.sh` existed. Both work. Use whichever exists on your machine and
-> substitute it everywhere below.
+### Which python
+
+`install.sh` makes `~/so101venv`. The **original Jetson** was set up by hand
+before `install.sh` existed and has `~/step0venv` instead. So this SOP never
+writes the path out: `devices.env` finds it once and exports `$PY`, and every
+command below runs as `$PY programs/...`.
+
+If your `devices.env` predates this, add these lines to it:
+
+```
+export PY="$(ls -d "$HOME"/so101venv/bin/python "$HOME"/step0venv/bin/python 2>/dev/null | head -1)"
+echo "PY=$PY"
+```
+
+`source devices.env` should then print a path. If it prints nothing, the
+virtualenv is missing — run `bash setup/install.sh`.
 
 ### Check it took
 
@@ -84,15 +97,19 @@ cp my_leader.json   ~/.cache/huggingface/lerobot/calibration/teleoperators/so_le
 Verify — this should print a path, `True`, and `6`:
 
 ```
-~/so101venv/bin/python -c "from lerobot.robots.so_follower import SOFollower,SOFollowerRobotConfig as C; r=SOFollower(C(port='/dev/null',id='my_follower')); print(r.calibration_fpath, r.calibration_fpath.is_file(), len(r.calibration))"
+$PY -c "from lerobot.robots.so_follower import SOFollower,SOFollowerRobotConfig as C; r=SOFollower(C(port='/dev/null',id='my_follower')); print(r.calibration_fpath, r.calibration_fpath.is_file(), len(r.calibration))"
 ```
 
 ### 2b. Only if these are DIFFERENT arms
 
 ```
-~/so101venv/bin/lerobot-calibrate --robot.type=so_follower --robot.port=<port> --robot.id=my_follower
-~/so101venv/bin/lerobot-calibrate --teleop.type=so_leader  --teleop.port=<port> --teleop.id=my_leader
+source devices.env
+$(dirname $PY)/lerobot-calibrate --robot.type=so_follower --robot.port="$FOLLOWER" --robot.id=my_follower
+$(dirname $PY)/lerobot-calibrate --teleop.type=so_leader  --teleop.port="$LEADER"   --teleop.id=my_leader
 ```
+
+(Do §3 first so `devices.env` exists — the ports have to be right before you
+calibrate, or you will calibrate the wrong arm.)
 
 Calibration writes an offset into each servo's EEPROM **and** the JSON file, and
 pre-flight later compares the two. So the file alone is not enough: a file
@@ -153,7 +170,7 @@ Edit `devices.env` with the values `list_devices.py` printed, then:
 
 ```
 source devices.env
-~/so101venv/bin/python programs/p2_record_cameras.py --no-arm --duration 3
+$PY programs/p2_record_cameras.py --no-arm --duration 3
 ```
 
 Open the two `logs/p2/<timestamp>/*_first.jpg` files. **The wrist camera is the
@@ -199,7 +216,7 @@ Before you touch the keyboard:
 
 ```
 source devices.env
-~/so101venv/bin/python programs/p1_follow_leader.py --duration 20
+$PY programs/p1_follow_leader.py --duration 20
 ```
 
 An 8-point pre-flight runs first and prints every check. It refuses to start on
@@ -225,8 +242,11 @@ away from a faulted arm.
 ### Then measure the latency
 
 ```
-~/so101venv/bin/python tools/analyze_latency.py logs/p1/<timestamp>/rows.jsonl
+$PY tools/analyze_latency.py "logs/p1/$(ls -t logs/p1 | head -1)/rows.jsonl"
 ```
+
+(That picks the most recent run. Name the directory explicitly if you want an
+older one.)
 
 Move **every one of the six joints** back and forth during the run, or the ones
 that did not move get skipped and there is nothing to correlate.
@@ -237,7 +257,7 @@ that did not move get skipped and there is nothing to correlate.
 
 ```
 source devices.env
-~/so101venv/bin/python programs/p2_record_cameras.py \
+$PY programs/p2_record_cameras.py \
     --fourcc MJPG --width 1024 --height 768 --fps 30 --arm-fps 120 \
     --max-step-deg 2 --max-step-gripper-pct 3.75 \
     --power-line-hz 60 --display on --duration 60
@@ -246,7 +266,7 @@ source devices.env
 Cameras only:
 
 ```
-~/so101venv/bin/python programs/p2_record_cameras.py --no-arm \
+$PY programs/p2_record_cameras.py --no-arm \
     --power-line-hz 60 --duration 60
 ```
 
@@ -343,7 +363,7 @@ Ping every servo without energising anything:
 
 ```
 source devices.env
-~/so101venv/bin/python - <<'PY'
+$PY - <<'PY'
 import os
 from lerobot.robots.so_follower import SOFollower, SOFollowerRobotConfig
 from lerobot.teleoperators.so_leader import SOLeader, SOLeaderTeleopConfig
