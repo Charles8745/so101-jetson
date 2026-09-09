@@ -16,26 +16,41 @@ Together these cover both failure shapes; neither costs an extra bus read.
 """
 
 
-def rate_limit(target, prev_cmd, max_step_deg):
-    """Clamp each joint of `target` to within max_step_deg of `prev_cmd`.
+def _limit_for(limits, joint):
+    """`limits` may be a scalar (same for every joint) or a per-joint dict.
+
+    Per-joint is the correct form: the five body joints are in DEGREES and the
+    gripper is in PERCENT of travel (see arm/units.py), so one number cannot be
+    right for both.
+    """
+    if limits is None:
+        return None
+    if isinstance(limits, dict):
+        return limits.get(joint)
+    return limits
+
+
+def rate_limit(target, prev_cmd, limits):
+    """Clamp each joint of `target` to within its limit of `prev_cmd`.
 
     Returns (clamped, n_clamped). `prev_cmd` None -> first step, pass through.
     """
-    if prev_cmd is None or max_step_deg is None or max_step_deg <= 0:
+    if prev_cmd is None:
         return dict(target), 0
     out = {}
     n = 0
     for k, v in target.items():
+        lim = _limit_for(limits, k)
         p = prev_cmd.get(k)
-        if p is None:
+        if p is None or lim is None or lim <= 0:
             out[k] = v
             continue
         d = v - p
-        if d > max_step_deg:
-            out[k] = p + max_step_deg
+        if d > lim:
+            out[k] = p + lim
             n += 1
-        elif d < -max_step_deg:
-            out[k] = p - max_step_deg
+        elif d < -lim:
+            out[k] = p - lim
             n += 1
         else:
             out[k] = v
@@ -56,27 +71,45 @@ def pose_diff(a, b):
 
 
 class TrackingWatchdog:
-    """Fault when |command - measured| stays above `tol_deg` for `n_strikes`
-    consecutive steps on any joint."""
+    """Fault when |command - measured| exceeds a joint's tolerance for
+    `n_strikes` consecutive steps.
 
-    def __init__(self, tol_deg=25.0, n_strikes=15):
-        self.tol_deg = tol_deg
+    `tol` is per-joint (dict) or scalar. Per-joint matters: 25 degrees and
+    25 percent-of-gripper-travel are not the same amount of wrong.
+    """
+
+    def __init__(self, tol=25.0, n_strikes=15):
+        self.tol = tol
         self.n_strikes = n_strikes
         self.strikes = 0
         self.worst_joint = None
         self.worst_value = 0.0
+        self.worst_tol = None
 
     def update(self, commanded, measured):
         """Returns True when the watchdog trips."""
-        _, worst, val = pose_diff(commanded, measured)
-        if val > self.tol_deg:
+        over_joint, over_val, over_tol = None, 0.0, None
+        for k, c in commanded.items():
+            m = measured.get(k)
+            lim = _limit_for(self.tol, k)
+            if m is None or lim is None:
+                continue
+            d = abs(c - m)
+            # rank by how far past its own tolerance the joint is
+            if d > lim and (over_tol is None or d / lim > over_val / over_tol):
+                over_joint, over_val, over_tol = k, d, lim
+        if over_joint is not None:
             self.strikes += 1
-            self.worst_joint, self.worst_value = worst, val
+            self.worst_joint = over_joint
+            self.worst_value = over_val
+            self.worst_tol = over_tol
         else:
             self.strikes = 0
         return self.strikes >= self.n_strikes
 
     def reason(self):
-        return (f"tracking error {self.worst_value:.1f} deg on "
+        from .units import unit_of
+        u = unit_of(self.worst_joint) if self.worst_joint else "?"
+        return (f"tracking error {self.worst_value:.1f} {u} on "
                 f"{self.worst_joint} for {self.strikes} consecutive steps "
-                f"(tol {self.tol_deg} deg)")
+                f"(tol {self.worst_tol} {u})")

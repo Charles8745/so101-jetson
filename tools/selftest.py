@@ -82,20 +82,78 @@ def test_rate_limit():
     print("ok  rate_limit")
 
 
+def test_rate_limit_first_step_is_the_dangerous_one():
+    """rate_limit() passes a joint straight through when it has no previous
+    command for it. That makes the FIRST step unclamped -- and step one is
+    exactly when the two arms are furthest apart. p1 therefore seeds prev_cmd
+    with the follower's MEASURED pose so the first command is limited like
+    every other one."""
+    from arm.control import rate_limit
+    from arm.units import per_joint
+    lim = per_joint(8.0, 15.0)
+    leader = {"shoulder_pan": 90.0, "gripper": 100.0}
+
+    unseeded, n = rate_limit(leader, None, lim)
+    assert unseeded["shoulder_pan"] == 90.0 and n == 0, \
+        "unseeded, the follower is told to go the whole 90 degrees at once"
+
+    follower_now = {"shoulder_pan": 0.0, "gripper": 0.0}
+    seeded, n = rate_limit(leader, follower_now, lim)
+    assert seeded["shoulder_pan"] == 8.0, seeded
+    assert seeded["gripper"] == 15.0, seeded
+    assert n == 2
+    src = open(os.path.join(ROOT, "programs", "p1_follow_leader.py")).read()
+    assert "prev_cmd = strip_pos(follower.get_observation())" in src, \
+        "p1 must seed the rate limiter from the follower's real position"
+    assert "watchdog_armed" in src, \
+        "the watchdog must not fire while the follower is still catching up"
+    print("ok  rate limiter is seeded, so step one is clamped too")
+
+
 def test_pose_diff_and_watchdog():
     from arm.control import TrackingWatchdog, pose_diff
     _, worst, val = pose_diff({"a": 10.0, "b": 0.0}, {"a": 1.0, "b": 0.5})
     assert worst == "a" and abs(val - 9.0) < 1e-9
-    w = TrackingWatchdog(tol_deg=5.0, n_strikes=3)
+    w = TrackingWatchdog(tol=5.0, n_strikes=3)
     assert not w.update({"a": 0.0}, {"a": 0.0})
     assert not w.update({"a": 100.0}, {"a": 0.0})
     assert not w.update({"a": 100.0}, {"a": 0.0})
     assert w.update({"a": 100.0}, {"a": 0.0}), "trips on the 3rd strike"
     assert "tracking error" in w.reason()
-    w2 = TrackingWatchdog(tol_deg=5.0, n_strikes=3)
+    w2 = TrackingWatchdog(tol=5.0, n_strikes=3)
     w2.update({"a": 100.0}, {"a": 0.0})
     assert not w2.update({"a": 0.0}, {"a": 0.0}), "in-tolerance resets strikes"
     print("ok  pose_diff + tracking watchdog")
+
+
+def test_units_are_not_all_degrees():
+    """The gripper is percent, not degrees. lerobot hard-codes RANGE_0_100 for
+    it whatever use_degrees says, so one scalar limit cannot serve both."""
+    from arm.control import TrackingWatchdog, rate_limit
+    from arm.units import (BODY_JOINTS, DEG_PER_TICK, GRIPPER, UNIT_DEG,
+                           UNIT_PCT, deg_range_from_calibration, per_joint,
+                           unit_of)
+    assert unit_of("shoulder_pan") == UNIT_DEG
+    assert unit_of(GRIPPER) == UNIT_PCT, "gripper must not be labelled degrees"
+    assert len(BODY_JOINTS) == 5
+    assert abs(DEG_PER_TICK - 360.0 / 4095) < 1e-12
+
+    lim = per_joint(8.0, 15.0)
+    out, n = rate_limit({"shoulder_pan": 100.0, GRIPPER: 100.0},
+                        {"shoulder_pan": 0.0, GRIPPER: 0.0}, lim)
+    assert out["shoulder_pan"] == 8.0 and out[GRIPPER] == 15.0, out
+    assert n == 2
+
+    # a gripper move inside its own percent tolerance must not trip a watchdog
+    # whose body tolerance is smaller
+    w = TrackingWatchdog(tol=per_joint(25.0, 30.0), n_strikes=1)
+    assert not w.update({GRIPPER: 28.0}, {GRIPPER: 0.0}), "28 pct < 30 pct tol"
+    assert w.update({"shoulder_pan": 28.0}, {"shoulder_pan": 0.0}), "28 deg > 25 deg tol"
+
+    # the real follower calibration must reproduce the ranges we measured
+    lo, hi = deg_range_from_calibration({"range_min": 851, "range_max": 3185})
+    assert abs(hi - 102.6) < 0.1 and abs(lo + 102.6) < 0.1, (lo, hi)
+    print("ok  unit semantics (gripper is percent, body is degrees)")
 
 
 def test_serial_parsing():
@@ -214,13 +272,16 @@ def test_resilient_reconnect():
           f"{rc.mode['width']}x{rc.mode['height']})")
 
 
+
 if __name__ == "__main__":
     test_clock()
     test_signal_jsonl()
     test_signal_udp()
     test_jsonl_writer()
     test_rate_limit()
+    test_rate_limit_first_step_is_the_dangerous_one()
     test_pose_diff_and_watchdog()
+    test_units_are_not_all_degrees()
     test_serial_parsing()
     test_best_lag()
     test_camera_bandwidth_budget()

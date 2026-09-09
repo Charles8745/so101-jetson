@@ -85,20 +85,27 @@ def run_preflight(leader, follower, leader_port, follower_port,
                   max_pose_diff_deg=15.0, probe_reads=30, force=False):
     """`leader` / `follower` are already-constructed (not connected) lerobot objects.
 
-    Returns (CheckResult, info dict). Connects both arms on success.
+    `follower` may be None -- p3 drives a SIMULATED arm and deliberately leaves
+    the real follower alone, so there is no second arm to check or align against.
+    Returns (CheckResult, info dict). Connects what it was given, on success.
     """
     r = CheckResult()
     info = {}
+    solo = follower is None
 
-    for label, port in (("leader", leader_port), ("follower", follower_port)):
+    ports = [("leader", leader_port)] + ([] if solo else [("follower", follower_port)])
+    for label, port in ports:
         r.add(f"[1] {label} port exists", os.path.exists(port), port)
 
-    same = os.path.realpath(leader_port) == os.path.realpath(follower_port)
-    r.add("[2] ports are two different devices", not same,
-          f"both resolve to {os.path.realpath(leader_port)}" if same else "")
+    if not solo:
+        same = os.path.realpath(leader_port) == os.path.realpath(follower_port)
+        r.add("[2] ports are two different devices", not same,
+              f"both resolve to {os.path.realpath(leader_port)}" if same else "")
 
-    for label, port, expect in (("leader", leader_port, expect_leader_serial),
-                                ("follower", follower_port, expect_follower_serial)):
+    serial_checks = [("leader", leader_port, expect_leader_serial)]
+    if not solo:
+        serial_checks.append(("follower", follower_port, expect_follower_serial))
+    for label, port, expect in serial_checks:
         got = serial_of_port(port)
         info[f"{label}_serial"] = got
         if expect is None:
@@ -113,7 +120,8 @@ def run_preflight(leader, follower, leader_port, follower_port,
     if not r.ok:
         return r, info
 
-    for label, obj in (("leader", leader), ("follower", follower)):
+    arms = [("leader", leader)] + ([] if solo else [("follower", follower)])
+    for label, obj in arms:
         n = len(obj.calibration)
         r.add(f"[4] {label} calibration file", obj.calibration_fpath.is_file() and n == 6,
               f"{obj.calibration_fpath} ({n} motors)")
@@ -122,48 +130,61 @@ def run_preflight(leader, follower, leader_port, follower_port,
 
     try:
         leader.connect(calibrate=False)
-        follower.connect(calibrate=False)
+        if not solo:
+            follower.connect(calibrate=False)
     except Exception as e:
         r.add("[5] connect", False, f"{type(e).__name__}: {e}")
         return r, info
-    r.add("[5] leader is_calibrated", leader.is_calibrated,
-          "motor values disagree with the file -- NOT auto-recalibrating")
-    r.add("[5] follower is_calibrated", follower.is_calibrated,
-          "motor values disagree with the file -- NOT auto-recalibrating")
+    for label, obj in arms:
+        r.add(f"[5] {label} is_calibrated", obj.is_calibrated,
+              "" if obj.is_calibrated else
+              "motor values disagree with the file -- NOT auto-recalibrating")
     if not r.ok:
         return r, info
 
     try:
         lead = strip_pos(leader.get_action())
-        foll = strip_pos(follower.get_observation())
+        foll = None if solo else strip_pos(follower.get_observation())
     except Exception as e:
         r.add("[6] read all motors", False, f"{type(e).__name__}: {e}")
         return r, info
     missing_l = [j for j in JOINTS if j not in lead]
-    missing_f = [j for j in JOINTS if j not in foll]
-    r.add("[6] leader reports 6 motors", not missing_l, f"missing {missing_l}")
-    r.add("[6] follower reports 6 motors", not missing_f, f"missing {missing_f}")
+    r.add("[6] leader reports 6 motors", not missing_l,
+          f"missing {missing_l}" if missing_l else "")
+    if not solo:
+        missing_f = [j for j in JOINTS if j not in foll]
+        r.add("[6] follower reports 6 motors", not missing_f,
+              f"missing {missing_f}" if missing_f else "")
+    info["leader_pose"] = lead
     if not r.ok:
         return r, info
 
-    from .control import pose_diff
-    diffs, worst, val = pose_diff(lead, foll)
-    info["pose_diff"] = diffs
-    aligned = val <= max_pose_diff_deg
-    detail = (f"worst {worst} {val:.1f} deg (limit {max_pose_diff_deg})"
-              + ("" if aligned else
-                 "  <-- move the LEADER to match the FOLLOWER, or pass --force"))
-    r.add("[7] leader/follower poses aligned", aligned or force, detail,
-          fatal=not force)
-    if force and not aligned:
-        r.rows[-1]["detail"] += "  [FORCED]"
+    if not solo:
+        from .control import pose_diff
+        diffs, worst, val = pose_diff(lead, foll)
+        info["pose_diff"] = diffs
+        aligned = val <= max_pose_diff_deg
+        # WARNING, not a refusal. Blocking the run costs more than it buys: a
+        # mismatched pose is something the operator can see, and the real
+        # hazard it guarded against is now removed at the source -- p1 seeds
+        # the rate limiter with the follower's MEASURED pose, so the very first
+        # command is clamped like every other one and the follower walks to the
+        # leader instead of snapping to it. (Before that fix the first step was
+        # unclamped, because rate_limit passes through when prev_cmd is None,
+        # and this check was the only thing standing in front of it.)
+        detail = (f"worst {worst} {val:.1f} deg (limit {max_pose_diff_deg})"
+                  + ("" if aligned else
+                     "  <-- the follower will WALK to the leader at the rate "
+                     "limit, not snap. Watch it, or align first."))
+        r.add("[7] leader/follower poses aligned", aligned, detail, fatal=False)
 
     t0 = time.monotonic()
     fails = 0
     for _ in range(probe_reads):
         try:
             leader.get_action()
-            follower.get_observation()
+            if not solo:
+                follower.get_observation()
         except Exception:
             fails += 1
     dt = time.monotonic() - t0

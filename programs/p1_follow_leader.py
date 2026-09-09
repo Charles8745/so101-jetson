@@ -34,6 +34,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from arm.control import TrackingWatchdog, pose_diff, rate_limit   # noqa: E402
 from arm.preflight import run_preflight, strip_pos                # noqa: E402
+from arm.units import UNITS, per_joint                             # noqa: E402
 from arm.signal_pub import SCHEMA, SignalPublisher                # noqa: E402
 from common.clock import epoch, stamp                             # noqa: E402
 from common.jsonl import JsonlWriter                              # noqa: E402
@@ -50,9 +51,13 @@ def build_args():
     ap.add_argument("--follower-serial", default=os.environ.get("FOLLOWER_SERIAL"))
     ap.add_argument("--fps", type=float, default=30.0)
     ap.add_argument("--max-step-deg", type=float, default=8.0,
-                    help="max joint move per step, vs previous command (0=off)")
+                    help="max BODY joint move per step, vs previous command (0=off)")
+    ap.add_argument("--max-step-gripper-pct", type=float, default=15.0,
+                    help="same for the gripper, which is PERCENT not degrees")
     ap.add_argument("--track-tol-deg", type=float, default=25.0,
-                    help="tracking-error tolerance for the watchdog")
+                    help="tracking-error tolerance, body joints (degrees)")
+    ap.add_argument("--track-tol-gripper-pct", type=float, default=30.0,
+                    help="tracking-error tolerance, gripper (percent)")
     ap.add_argument("--track-strikes", type=int, default=15,
                     help="consecutive out-of-tolerance steps before fault")
     ap.add_argument("--max-pose-diff-deg", type=float, default=15.0,
@@ -87,7 +92,8 @@ def main():
     rows = JsonlWriter(os.path.join(run_dir, "rows.jsonl"))
     events = JsonlWriter(os.path.join(run_dir, "events.jsonl"))
     pub = SignalPublisher(udp_addr=args.udp)
-    events.event("start", argv=sys.argv[1:], epoch=epoch(), run_dir=run_dir)
+    events.event("start", argv=sys.argv[1:], epoch=epoch(), run_dir=run_dir,
+                 units=UNITS)
     print(f"[p1] logging to {run_dir}")
 
     print("[p1] pre-flight ...")
@@ -134,9 +140,31 @@ def main():
     print("\n[p1] RUNNING. Move the leader; the follower follows.")
     print("[p1] Press ENTER to stop and release torque. Ctrl+C does the same.")
 
-    watchdog = TrackingWatchdog(args.track_tol_deg, args.track_strikes)
+    step_limits = per_joint(args.max_step_deg, args.max_step_gripper_pct)
+    track_tol = per_joint(args.track_tol_deg, args.track_tol_gripper_pct)
+    watchdog = TrackingWatchdog(track_tol, args.track_strikes)
     period = 1.0 / args.fps
-    prev_cmd = None
+
+    # ** Seed the rate limiter with where the follower ACTUALLY IS. **
+    # rate_limit() passes a joint straight through when it has no previous
+    # command for it, so leaving this None makes the FIRST step unclamped: the
+    # follower receives the leader's full pose as a goal and drives there at
+    # whatever speed the servo can manage. Every later step is limited; only
+    # step one was not, which is exactly the step where the two arms are
+    # furthest apart. Seeded, the follower walks to the leader at the same
+    # limit as everything else.
+    try:
+        prev_cmd = strip_pos(follower.get_observation())
+    except Exception as e:
+        events.event("seed_failed", err=repr(e))
+        prev_cmd = None
+    events.event("rate_limiter_seeded", prev_cmd=prev_cmd)
+
+    # The watchdog must not fire DURING that walk. While the follower is
+    # catching up the command legitimately leads the measurement, and a long
+    # catch-up would otherwise trip a fault that means nothing. Arm it once
+    # tracking has been good a single time.
+    watchdog_armed = False
     seq = 0
     clamped_total = 0
     fault = None
@@ -151,7 +179,7 @@ def main():
             t2 = time.monotonic()
 
             target = strip_pos(raw)
-            cmd, n_clamped = rate_limit(target, prev_cmd, args.max_step_deg)
+            cmd, n_clamped = rate_limit(target, prev_cmd, step_limits)
             clamped_total += n_clamped
             follower.send_action({f"{k}.pos": v for k, v in cmd.items()})
             t3 = time.monotonic()
@@ -160,7 +188,7 @@ def main():
             _, wj, wv = pose_diff(cmd, meas)
             rec = {"schema": SCHEMA, "seq": seq, **stamp(),
                    "leader": target, "follower": meas, "command": cmd,
-                   "units": "deg",
+                   "units": UNITS,
                    "dt_read_leader_ms": round((t1 - t0) * 1e3, 3),
                    "dt_read_follower_ms": round((t2 - t1) * 1e3, 3),
                    "dt_write_ms": round((t3 - t2) * 1e3, 3),
@@ -171,7 +199,12 @@ def main():
             pub.publish(rec)
             seq += 1
 
-            if watchdog.update(cmd, meas):
+            if not watchdog_armed:
+                _, _, gap = pose_diff(cmd, meas)
+                if gap <= max(args.track_tol_deg, args.track_tol_gripper_pct):
+                    watchdog_armed = True
+                    events.event("watchdog_armed", seq=seq)
+            elif watchdog.update(cmd, meas):
                 fault = "tracking_watchdog: " + watchdog.reason()
                 break
             if t_end and time.monotonic() >= t_end:
