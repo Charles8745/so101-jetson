@@ -798,6 +798,106 @@ def test_echo_backend_clips_and_reports():
     print("ok  echo backend (clips, and is honest about not reading back)")
 
 
+
+def _load_report_tool():
+    """Load tools/usd_joint_report.py by path: tools/ is not a package."""
+    import importlib.util
+    path = os.path.join(ROOT, "tools", "usd_joint_report.py")
+    spec = importlib.util.spec_from_file_location("_ujr", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _write_mjcf(tmp, angle="radian", kp="998.22"):
+    """A cut-down so101_new_calib.xml: the parts that decide the numbers.
+
+    Deliberately keeps the shape that caused the 0908 mistake -- TWO top level
+    <default> blocks, a childclass that is overridden on every element, and a
+    forcerange in the class that every actuator overrides.
+    """
+    path = os.path.join(tmp, "m.xml")
+    with open(path, "w") as f:
+        f.write(f"""<mujoco model="t">
+  <compiler angle="{angle}"/>
+  <default>
+    <default class="outer">
+      <joint damping="1" frictionloss="0.1" armature="0.005"/>
+      <position kp="50"/>
+    </default>
+  </default>
+  <default>
+    <default class="sts3215">
+      <joint damping="0.60" frictionloss="0.052" armature="0.028"/>
+      <position kp="{kp}" kv="2.731" forcerange="-2.94 2.94"/>
+    </default>
+  </default>
+  <worldbody>
+    <body name="b" childclass="outer">
+      <joint name="j1" type="hinge" class="sts3215"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <position class="sts3215" name="j1" joint="j1" forcerange="-3.35 3.35"/>
+  </actuator>
+</mujoco>
+""")
+    return path
+
+
+def test_a_radian_gain_in_a_degree_field_is_off_by_57():
+    """The 0908 bug, pinned. UsdPhysics angular stiffness is PER DEGREE."""
+    m = _load_report_tool()
+    assert abs(m.DEG_PER_RAD - 57.29577951308232) < 1e-12, m.DEG_PER_RAD
+    with tempfile.TemporaryDirectory() as tmp:
+        exp = m.expected_from_mjcf(m.read_mjcf(_write_mjcf(tmp)))["j1"]
+    # MuJoCo is radian-native, so its kp is what PhysX must end up holding.
+    assert abs(exp["kp_rad"] - 998.22) < 1e-9, exp
+    # ...and the number that goes INTO the USD field is 57.29578x smaller.
+    assert abs(exp["usd_stiffness_deg"] - 998.22 / m.DEG_PER_RAD) < 1e-9, exp
+    assert abs(exp["usd_stiffness_deg"] - 17.4222) < 1e-3, exp
+    # Writing the radian value straight in is exactly the factor we measured
+    # coming back out of PhysX on 2026-09-08 (998.22 -> 57193.79).
+    assert abs(998.22 * m.DEG_PER_RAD - 57193.79) < 0.5
+    # And 17.8 (the old_calib value, which omits the 180/pi) lands within 2.2%
+    # of correct when it is wrongly written into the degree field -- two bugs
+    # cancelling. That accident is why the first sweep looked sane.
+    assert abs(17.8 * m.DEG_PER_RAD - 998.22) / 998.22 < 0.025
+    print("ok  a radian gain in a degree field is off by 57.29578")
+
+
+def test_mjcf_element_attributes_beat_the_class_default():
+    """forcerange -2.94 2.94 in class sts3215 is dead code: every actuator
+    overrides it with -3.35 3.35. The 0908 sweep used 2.94 -- a setting that
+    does not exist in the model. Damping is the actuator's kv PLUS the joint's
+    own damping; taking only one of them understates it."""
+    m = _load_report_tool()
+    with tempfile.TemporaryDirectory() as tmp:
+        exp = m.expected_from_mjcf(m.read_mjcf(_write_mjcf(tmp)))["j1"]
+    assert exp["maxForce"] == 3.35, exp["maxForce"]
+    assert abs(exp["damping_rad"] - (2.731 + 0.60)) < 1e-12, exp
+    assert exp["damping_parts"] == {"actuator_kv": 2.731, "joint_damping": 0.60}, exp
+    # The outer childclass must not leak in: it would give armature 0.005.
+    assert exp["armature"] == 0.028, exp
+    assert exp["frictionloss"] == 0.052, exp
+    assert not exp["unresolved"], exp
+    print("ok  mjcf element attributes beat the class default")
+
+
+def test_a_degree_native_mjcf_is_refused_not_guessed():
+    """A degree-native MJCF needs different arithmetic. Guessing which one you
+    have is how the 57.29578 bug happened; so we refuse and say so."""
+    m = _load_report_tool()
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            m.read_mjcf(_write_mjcf(tmp, angle="degree"))
+        except RuntimeError as e:
+            assert "radian" in str(e), e
+        else:
+            raise AssertionError("a degree-native MJCF was accepted")
+    print("ok  a degree-native mjcf is refused, not guessed")
+
+
 def test_every_pasteable_command_in_the_docs_actually_parses():
     """A ```sh block in docs/ must survive being pasted into a shell.
 
@@ -1017,6 +1117,9 @@ if __name__ == "__main__":
     test_echo_backend_clips_and_reports()
     test_step_limit_is_a_speed_not_a_number()
     test_p1_and_p2_agree_on_defaults_that_make_them_comparable()
+    test_a_radian_gain_in_a_degree_field_is_off_by_57()
+    test_mjcf_element_attributes_beat_the_class_default()
+    test_a_degree_native_mjcf_is_refused_not_guessed()
     test_every_pasteable_command_in_the_docs_actually_parses()
     test_the_launchers_parse_and_point_at_files_that_exist()
     print("ALL PASS")
