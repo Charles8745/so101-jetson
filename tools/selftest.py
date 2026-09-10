@@ -83,38 +83,120 @@ def test_rate_limit():
     print("ok  rate_limit")
 
 
+class _stub_imaging:
+    """Import our camera/program modules with no OpenCV or numpy installed.
+
+    resilient_camera imports cv2 at module level and p2 imports numpy too, so
+    touching either needs *something* under those names. Everything else in
+    this file runs on a bare python and that is the point of it: `so101
+    selftest` has to be able to say "the code is fine, go and look at the
+    hardware" on a machine where the install itself is what went wrong.
+
+    Pass any of our own modules that must be re-imported inside the block --
+    `from x import y` hands back a cached module still bound to the real cv2,
+    and the stub would be silently ignored.
+    """
+
+    def __init__(self, *evict):
+        self._evict = ("camera.resilient_camera",) + evict
+
+    def __enter__(self):
+        # Ask BEFORE evicting anything. The real OpenCV cannot survive being
+        # dropped from sys.modules and re-imported: its __init__ pulls in
+        # cv2.typing and cv2.mat_wrapper, which are still cached and refer back
+        # to the half-built parent, so the retry dies on a circular import.
+        # Whatever is really installed is therefore left completely alone.
+        self._saved = {}
+        for name, build in (("cv2", self._fake_cv2), ("numpy", self._fake_numpy)):
+            try:
+                __import__(name)
+            except ImportError:
+                self._saved[name] = sys.modules.get(name)
+                sys.modules[name] = build()
+        for name in self._evict:
+            self._saved[name] = sys.modules.get(name)
+            sys.modules.pop(name, None)
+        return self
+
+    @staticmethod
+    def _fake_cv2():
+        fake = types.ModuleType("cv2")
+        for i, name in enumerate((
+                "CAP_V4L2", "CAP_PROP_FOURCC", "CAP_PROP_FRAME_WIDTH",
+                "CAP_PROP_FRAME_HEIGHT", "CAP_PROP_FPS", "CAP_PROP_AUTO_EXPOSURE",
+                "ROTATE_90_CLOCKWISE", "ROTATE_180", "ROTATE_90_COUNTERCLOCKWISE",
+                "INTER_AREA", "FONT_HERSHEY_SIMPLEX", "WINDOW_NORMAL")):
+            setattr(fake, name, i)
+        fake.rotate = lambda f, code: f
+        fake.VideoWriter_fourcc = lambda *a: 0
+        fake.VideoWriter = lambda *a, **k: None
+        fake.VideoCapture = lambda *a, **k: None
+        fake.getBuildInformation = lambda: "GUI: NONE"
+        return fake
+
+    @staticmethod
+    def _fake_numpy():
+        fake = types.ModuleType("numpy")
+        fake.uint8 = "uint8"
+        fake.ndarray = type("ndarray", (), {})
+        fake.zeros = lambda *a, **k: None
+        fake.concatenate = lambda *a, **k: None
+        return fake
+
+    def __exit__(self, *exc):
+        for k, v in self._saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        return False
+
+
 def test_camera_rotation_is_applied_at_the_source():
     """A camera mounted upside down is corrected in the capture thread, so the
     video file and the live view get the same picture. Correcting it only at
     display leaves the RECORDING upside down, which nobody notices until a
     policy is trained on it. 90/270 also swap the frame size, so the writer has
     to be sized for the output, not for the sensor mode."""
-    import numpy as np
-    from camera.resilient_camera import ResilientCamera
-    c0 = ResilientCamera("a", "/dev/null", 1024, 768, 30, rotate=0)
-    c180 = ResilientCamera("b", "/dev/null", 1024, 768, 30, rotate=180)
-    c90 = ResilientCamera("c", "/dev/null", 1024, 768, 30, rotate=90)
-    assert c0.out_size() == (1024, 768)
-    assert c180.out_size() == (1024, 768)
-    assert c90.out_size() == (768, 1024), "90 deg swaps width and height"
-    try:
-        ResilientCamera("d", "/dev/null", 640, 480, 30, rotate=45)
-        raise AssertionError("45 deg should be refused")
-    except ValueError:
-        pass
+    with _stub_imaging():
+        from camera.resilient_camera import ResilientCamera
+        c0 = ResilientCamera("a", "/dev/null", 1024, 768, 30, rotate=0)
+        c180 = ResilientCamera("b", "/dev/null", 1024, 768, 30, rotate=180)
+        c90 = ResilientCamera("c", "/dev/null", 1024, 768, 30, rotate=90)
+        assert c0.out_size() == (1024, 768)
+        assert c180.out_size() == (1024, 768)
+        assert c90.out_size() == (768, 1024), "90 deg swaps width and height"
+        try:
+            ResilientCamera("d", "/dev/null", 640, 480, 30, rotate=45)
+            raise AssertionError("45 deg should be refused")
+        except ValueError:
+            pass
 
-    f = np.zeros((4, 6, 3), dtype=np.uint8)
-    f[0, 0] = (1, 2, 3)
-    import cv2 as _cv
-    r = _cv.rotate(f, _cv.ROTATE_180)
-    assert tuple(r[-1, -1]) == (1, 2, 3), "180 puts the corner opposite"
+    # This next part checks OpenCV's own behaviour, not ours, so it is optional:
+    # everything else in this file runs with no numpy and no OpenCV installed,
+    # which is what lets `so101 selftest` separate "the code is broken" from
+    # "the machine is broken". Losing that to a third-party sanity check would
+    # be a bad trade.
+    rotation_checked = False
+    try:
+        import cv2 as _cv
+        import numpy as np
+    except ImportError:
+        pass
+    else:  # noqa: E301
+        f = np.zeros((4, 6, 3), dtype=np.uint8)
+        f[0, 0] = (1, 2, 3)
+        r = _cv.rotate(f, _cv.ROTATE_180)
+        assert tuple(r[-1, -1]) == (1, 2, 3), "180 puts the corner opposite"
+        rotation_checked = True
 
     src = open(os.path.join(ROOT, "camera", "resilient_camera.py")).read()
     assert "frame = cv2.rotate(frame, self._rot)" in src, \
         "rotation must happen in the capture loop, not at display"
     p2 = open(os.path.join(ROOT, "programs", "p2_record_cameras.py")).read()
     assert "out_size[name]" in p2, "the writer must be sized for the OUTPUT"
-    print("ok  camera rotation is applied at the source, and resizes the writer")
+    print("ok  camera rotation is applied at the source, and resizes the writer"
+          + ("" if rotation_checked else "  (pixel check skipped: no cv2/numpy)"))
 
 
 def test_exposure_and_mains_frequency_are_independent():
@@ -761,7 +843,19 @@ def test_every_pasteable_command_in_the_docs_actually_parses():
                              f"shell that is a redirection, not a blank\n{block}")
             checked += 1
     assert checked >= 15, f"only {checked} sh blocks found; did the tags get lost?"
-    print(f"ok  every pasteable command in docs/ parses ({checked} blocks)")
+
+    # The SOP tells the reader how many checks to expect, and that number was
+    # already two behind before anyone noticed. A count in a document is a fact
+    # about the code, so hold it to the code.
+    me = pathlib.Path(__file__).read_text()
+    ran = len(re.findall(r"^    test_\w+\(\)$", me, re.M))
+    sop = pathlib.Path(os.path.join(ROOT, "docs", "SOP.md")).read_text()
+    m = re.search(r"`ALL PASS` and (\d+) checks", sop)
+    assert m, "docs/SOP.md no longer says how many checks to expect"
+    assert int(m.group(1)) == ran, (
+        f"docs/SOP.md promises {m.group(1)} checks, this file runs {ran}")
+    print(f"ok  every pasteable command in docs/ parses ({checked} blocks), "
+          f"and the SOP's count of {ran} is right")
 
 
 def test_the_launchers_parse_and_point_at_files_that_exist():
@@ -801,6 +895,91 @@ def test_the_launchers_parse_and_point_at_files_that_exist():
 
 
 
+def _argparse_defaults(ap):
+    import argparse
+    return {a.dest: a.default for a in ap._actions
+            if not isinstance(a, argparse._HelpAction)}
+
+
+def test_step_limit_is_a_speed_not_a_number():
+    """The per-step limit must follow the loop rate, or it means four things.
+
+    rate_limit() clamps per STEP. 8 degrees per step is 240 deg/s at 30 Hz and
+    960 deg/s at 120 Hz. Before this, both programs defaulted to 8.0 whatever
+    the rate -- so p2's own default (60 Hz) was already running at twice the
+    speed the SOP documents as safe, and `--arm-fps 120` without the matching
+    `--max-step-deg 2` would have been four times.
+
+    Checked here: the speed is constant across rates, an explicit flag still
+    wins, the two flags are independent, and a bad rate is refused rather than
+    dividing by zero into an infinite limit.
+    """
+    from arm.control import (MAX_GRIPPER_PCT_PER_S, MAX_JOINT_DEG_PER_S,
+                             step_limits_for)
+
+    for fps in (10, 30, 60, 120, 200):
+        deg, grip, derived = step_limits_for(fps)
+        assert abs(deg * fps - MAX_JOINT_DEG_PER_S) < 1e-9, (fps, deg)
+        assert abs(grip * fps - MAX_GRIPPER_PCT_PER_S) < 1e-9, (fps, grip)
+        assert derived == ("max_step_deg", "max_step_gripper_pct"), derived
+
+    # The table in docs/SOP.md, reproduced from the constants. If someone
+    # changes a constant, this is what says the document is now wrong.
+    assert step_limits_for(30)[:2] == (8.0, 15.0)
+    assert step_limits_for(60)[:2] == (4.0, 7.5)
+    assert step_limits_for(120)[:2] == (2.0, 3.75)
+
+    deg, grip, derived = step_limits_for(120, max_step_deg=5.0)
+    assert deg == 5.0 and derived == ("max_step_gripper_pct",), (deg, derived)
+    deg, grip, derived = step_limits_for(120, max_step_gripper_pct=9.0)
+    assert grip == 9.0 and derived == ("max_step_deg",), (grip, derived)
+    assert step_limits_for(120, 5.0, 9.0)[2] == (), "nothing was derived"
+
+    # 0 means "off" for a LIMIT, but as a RATE it is a division by zero that
+    # would hand back an infinite limit -- the one value that must not be
+    # silently accepted.
+    for bad in (0, -1, None):
+        try:
+            step_limits_for(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"step_limits_for({bad!r}) should have refused")
+    print("ok  step limit is a speed, and it scales with the loop rate")
+
+
+def test_p1_and_p2_agree_on_defaults_that_make_them_comparable():
+    """p2 exists to answer "does running the cameras degrade the arm?".
+
+    That comparison is only valid if the arm loop is set up identically in
+    both, so the two defaults are checked against each other here rather than
+    left to whoever edits one file and not the other.
+    """
+    import importlib
+
+    # p2 imports cv2 and numpy at module level; this file must still run
+    # without them. The helper stubs only what is genuinely missing and puts
+    # sys.modules back exactly as it found it -- another test installs its own
+    # fake cv2 and would be poisoned by a leftover.
+    progs = ("programs.p1_follow_leader", "programs.p2_record_cameras")
+    with _stub_imaging(*progs):
+        p1 = importlib.import_module(progs[0])
+        p2 = importlib.import_module(progs[1])
+        d1 = _argparse_defaults(p1.build_args())
+        d2 = _argparse_defaults(p2.build_args())
+
+    assert d1["fps"] == d2["arm_fps"], (
+        f"p1 --fps {d1['fps']} but p2 --arm-fps {d2['arm_fps']}: a bare p1 and "
+        f"a bare p2 would run the arm at different rates and could not be "
+        f"compared")
+    for k in ("max_step_deg", "max_step_gripper_pct"):
+        assert d1[k] is None and d2[k] is None, (
+            f"{k} must default to None in both so it is derived from the rate")
+    for k in ("track_tol_deg", "track_tol_gripper_pct", "track_strikes"):
+        assert d1[k] == d2[k], f"{k}: p1 {d1[k]} vs p2 {d2[k]}"
+    print("ok  p1 and p2 default to the same arm loop, so p2's comparison holds")
+
+
+
 if __name__ == "__main__":
     test_clock()
     test_signal_jsonl()
@@ -830,6 +1009,8 @@ if __name__ == "__main__":
     test_ctl_tracker_retransmits_then_gives_up()
     test_receiver_ctl_cache_is_per_sender_and_per_run()
     test_echo_backend_clips_and_reports()
+    test_step_limit_is_a_speed_not_a_number()
+    test_p1_and_p2_agree_on_defaults_that_make_them_comparable()
     test_every_pasteable_command_in_the_docs_actually_parses()
     test_the_launchers_parse_and_point_at_files_that_exist()
     print("ALL PASS")
