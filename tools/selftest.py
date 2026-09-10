@@ -7,6 +7,7 @@ covered here and never claimed to be.
 """
 import json
 import os
+import pathlib
 import sys
 import tempfile
 import time
@@ -715,6 +716,91 @@ def test_echo_backend_clips_and_reports():
     print("ok  echo backend (clips, and is honest about not reading back)")
 
 
+def test_every_pasteable_command_in_the_docs_actually_parses():
+    """A ```sh block in docs/ must survive being pasted into a shell.
+
+    This exists because it has already gone wrong: the SOP hard-coded
+    ~/so101venv/bin/python, the machine had ~/step0venv, and every command in
+    the handover document failed on the first paste. The prose next to it
+    explained the difference -- which helps nobody who is copying the block.
+
+    Two things are checked, and the second is the dangerous one:
+
+      1. `bash -n` parses it. A block that cannot even parse is dead on arrival.
+
+      2. No UNQUOTED <placeholder>. In a shell `<name>` is not a blank to fill
+         in, it is a REDIRECTION: `--usd <so101.usd>` reads from one file and
+         TRUNCATES another. Sometimes that is a syntax error and you find out;
+         sometimes it parses fine and silently creates files. Quoting it --
+         `"<so101.usd>"` -- keeps it visibly blank and makes it fail loudly.
+
+    Blocks that are diagrams or sample output stay untagged and are skipped,
+    which is what the `sh` tag is for: it marks a block as meant to be pasted.
+    """
+    import re
+    import subprocess
+
+    docs = sorted(pathlib.Path(os.path.join(ROOT, "docs")).glob("*.md"))
+    assert docs, "no docs/ to check"
+    checked = 0
+    for doc in docs:
+        text = doc.read_text()
+        for m in re.finditer(r"^```sh\n(.*?)^```", text, re.S | re.M):
+            block = m.group(1)
+            line = text[:m.start()].count("\n") + 1
+            where = f"{doc.name}:{line}"
+
+            r = subprocess.run(["bash", "-n"], input=block,
+                               text=True, capture_output=True)
+            assert r.returncode == 0, f"{where}: will not parse\n{r.stderr}{block}"
+
+            # Strip quoted spans before looking, so a quoted placeholder passes.
+            bare = re.sub(r"'[^']*'", "", re.sub(r'"[^"]*"', "", block))
+            bad = re.findall(r"<[A-Za-z_][A-Za-z0-9_.-]*>", bare)
+            assert not bad, (f"{where}: unquoted placeholder(s) {bad} -- in a "
+                             f"shell that is a redirection, not a blank\n{block}")
+            checked += 1
+    assert checked >= 15, f"only {checked} sh blocks found; did the tags get lost?"
+    print(f"ok  every pasteable command in docs/ parses ({checked} blocks)")
+
+
+def test_the_launchers_parse_and_point_at_files_that_exist():
+    """bin/ is now the only documented way to run anything, so a typo in it
+    breaks every command in the SOP at once. Check two things statically:
+    the scripts parse, and every repo-relative path they exec actually exists.
+    """
+    import re
+    import subprocess
+
+    binder = pathlib.Path(os.path.join(ROOT, "bin"))
+    scripts = sorted(p for p in binder.iterdir() if p.is_file())
+    assert {p.name for p in scripts} >= {"so101", "p1", "p2", "p3"}, scripts
+
+    for script in scripts:
+        r = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        assert r.returncode == 0, f"bin/{script.name}: {r.stderr}"
+        assert os.access(script, os.X_OK), f"bin/{script.name} is not executable"
+
+    body = (binder / "so101").read_text()
+    targets = re.findall(r'(?:run_program |run_tool |"\$REPO/)'
+                         r'((?:programs|tools|sim)/[\w./]+\.py)', body)
+    assert len(targets) >= 8, f"only found {len(targets)} script paths: {targets}"
+    for rel in targets:
+        assert os.path.isfile(os.path.join(ROOT, rel)), \
+            f"bin/so101 execs {rel}, which does not exist"
+
+    # Every subcommand in the case statement must appear in the usage text, or
+    # it exists and nobody can find it.
+    cases = set(re.findall(r"^  ([a-z0-9|]+)\)", body, re.M))
+    named = {c for group in cases for c in group.split("|")}
+    named -= {"*", "help", "-h", "--help", "leader", "follower"}
+    usage = body[body.index("usage() {"):body.index("USAGE\n}")]
+    missing = sorted(c for c in named if c not in usage)
+    assert not missing, f"bin/so101 subcommands not listed in its own usage: {missing}"
+    print(f"ok  launchers parse, and every path they run exists ({len(targets)} scripts)")
+
+
+
 if __name__ == "__main__":
     test_clock()
     test_signal_jsonl()
@@ -744,4 +830,6 @@ if __name__ == "__main__":
     test_ctl_tracker_retransmits_then_gives_up()
     test_receiver_ctl_cache_is_per_sender_and_per_run()
     test_echo_backend_clips_and_reports()
+    test_every_pasteable_command_in_the_docs_actually_parses()
+    test_the_launchers_parse_and_point_at_files_that_exist()
     print("ALL PASS")
