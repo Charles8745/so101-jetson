@@ -50,7 +50,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from arm.control import rate_limit                                     # noqa: E402
+from arm.control import rate_limit, step_limits_for                    # noqa: E402
 from arm.preflight import JOINTS, run_preflight, strip_pos                     # noqa: E402
 from arm.sim_mapping import SPAN_WARN, SimMap                          # noqa: E402
 from arm.signal_pub import SignalPublisher                             # noqa: E402
@@ -254,9 +254,18 @@ def build_args():
                          "the arm and the map on the Jetson alone")
     ap.add_argument("--cmd-port", type=int, default=DEFAULT_CMD_PORT)
     ap.add_argument("--ack-port", type=int, default=DEFAULT_ACK_PORT)
-    ap.add_argument("--fps", type=float, default=30.0)
-    ap.add_argument("--max-step-deg", type=float, default=8.0)
-    ap.add_argument("--max-step-gripper-pct", type=float, default=15.0)
+    # 30 Hz, not p1/p2's 120: there is a simulator on the other end and it
+    # applies at ITS tick. Sending faster than the sim ticks does not move the
+    # arm sooner, it just makes more commands arrive between ticks and get
+    # superseded -- which p3 counts, so you can see it. Raise it once the sim's
+    # own rate is known; the step limit follows automatically.
+    ap.add_argument("--fps", type=float, default=30.0,
+                    help="leader sampling rate. Match the simulator's tick "
+                         "rather than raising it blindly")
+    ap.add_argument("--max-step-deg", type=float, default=None,
+                    help="max BODY joint move per step. Derived from --fps to "
+                         "hold a constant deg/s if not given")
+    ap.add_argument("--max-step-gripper-pct", type=float, default=None)
     ap.add_argument("--link-timeout-ms", type=float, default=1000.0,
                     help="no ack for this long while recording -> discard episode")
     ap.add_argument("--read-strikes", type=int, default=5,
@@ -423,7 +432,18 @@ def main():
             print("[p3]   stop it with SIGINT/SIGTERM.\n")
         events.event("console_disabled", duration=args.duration)
 
-    step_limits = per_joint(args.max_step_deg, args.max_step_gripper_pct)
+    # Same derivation as p1 and p2: the limit is per STEP, so a fixed number is
+    # a different SPEED at every rate. p3's default of 30 Hz happened to land
+    # on the right one; raising --fps without this would not have.
+    step_deg, step_grip, derived = step_limits_for(
+        args.fps, args.max_step_deg, args.max_step_gripper_pct)
+    step_limits = per_joint(step_deg, step_grip)
+    print(f"[p3] {args.fps:g} Hz, limit {step_deg:g} deg/step "
+          f"({step_deg * args.fps:.0f} deg/s), {step_grip:g} %/step"
+          + (f"  [{', '.join(derived)} derived from --fps]" if derived else
+             "  [given on the command line]"))
+    events.event("step_limits", fps=args.fps, max_step_deg=step_deg,
+                 max_step_gripper_pct=step_grip, derived=list(derived))
     period = 1.0 / args.fps
     prev_cmd = None
     seq = 0

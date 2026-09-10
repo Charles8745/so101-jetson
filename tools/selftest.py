@@ -960,23 +960,29 @@ def test_p1_and_p2_agree_on_defaults_that_make_them_comparable():
     # without them. The helper stubs only what is genuinely missing and puts
     # sys.modules back exactly as it found it -- another test installs its own
     # fake cv2 and would be poisoned by a leftover.
-    progs = ("programs.p1_follow_leader", "programs.p2_record_cameras")
+    progs = ("programs.p1_follow_leader", "programs.p2_record_cameras",
+             "programs.p3_teleop_sim")
     with _stub_imaging(*progs):
-        p1 = importlib.import_module(progs[0])
-        p2 = importlib.import_module(progs[1])
-        d1 = _argparse_defaults(p1.build_args())
-        d2 = _argparse_defaults(p2.build_args())
+        mods = [importlib.import_module(m) for m in progs]
+        d1, d2, d3 = [_argparse_defaults(m.build_args()) for m in mods]
 
     assert d1["fps"] == d2["arm_fps"], (
         f"p1 --fps {d1['fps']} but p2 --arm-fps {d2['arm_fps']}: a bare p1 and "
         f"a bare p2 would run the arm at different rates and could not be "
         f"compared")
-    for k in ("max_step_deg", "max_step_gripper_pct"):
-        assert d1[k] is None and d2[k] is None, (
-            f"{k} must default to None in both so it is derived from the rate")
     for k in ("track_tol_deg", "track_tol_gripper_pct", "track_strikes"):
         assert d1[k] == d2[k], f"{k}: p1 {d1[k]} vs p2 {d2[k]}"
-    print("ok  p1 and p2 default to the same arm loop, so p2's comparison holds")
+
+    # All THREE derive their step limit. p3 is allowed its own rate -- it feeds
+    # a simulator and should match the sim's tick, not the servo bus -- but it
+    # must not go back to a fixed limit, which at 30 Hz merely happens to land
+    # on the right speed and stops doing so the moment anyone raises --fps.
+    for name, d in (("p1", d1), ("p2", d2), ("p3", d3)):
+        for k in ("max_step_deg", "max_step_gripper_pct"):
+            assert d[k] is None, (
+                f"{name} --{k.replace('_', '-')} must default to None so it is "
+                f"derived from the loop rate, not fixed at {d[k]}")
+    print("ok  p1/p2/p3 all derive the step limit, and p1 and p2 share a rate")
 
 
 
