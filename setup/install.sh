@@ -8,7 +8,10 @@ REPO="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 
 echo "[1/5] apt deps (needs sudo)"
 sudo apt-get update
-sudo apt-get install -y python3-venv python3-dev v4l-utils
+# fonts-dejavu-core: OpenCV's bundled Qt has no fontconfig, so it looks for
+# fonts in one hard-coded directory inside the cv2 package and warns on every
+# window when they are not there. Step 3 puts them where it looks.
+sudo apt-get install -y python3-venv python3-dev v4l-utils fonts-dejavu-core
 
 echo "[2/5] python venv at $VENV"
 python3 -m venv "$VENV"
@@ -19,6 +22,29 @@ echo "[3/5] python packages"
 # live display needs the FULL opencv, not the headless build lerobot pulls in
 "$VENV/bin/python" -m pip uninstall -y opencv-python-headless || true
 "$VENV/bin/python" -m pip install opencv-python
+
+# Silence "QFontDatabase: Cannot find font directory .../cv2/qt/fonts" -- a
+# warning, not an error: it is OpenCV's own window chrome that goes unstyled,
+# and every character p2 draws on the picture uses OpenCV's built-in Hershey
+# font, not Qt. But it prints on every window and buries p2's real output.
+# The path is asked of cv2 rather than written down, so this keeps working
+# wherever the venv is.
+"$VENV/bin/python" - <<'FONTS'
+import glob, os, shutil
+try:
+    import cv2
+except ImportError:
+    raise SystemExit
+d = os.path.join(os.path.dirname(cv2.__file__), "qt", "fonts")
+src = sorted(glob.glob("/usr/share/fonts/truetype/dejavu/DejaVuSans*.ttf"))
+if not src:
+    print("      no DejaVu fonts found -- skipping (harmless, Qt will warn)")
+    raise SystemExit
+os.makedirs(d, exist_ok=True)
+for f in src:
+    shutil.copy(f, d)
+print(f"      {len(src)} fonts -> {d}")
+FONTS
 
 echo "[4/5] serial port permissions"
 sudo usermod -aG dialout "$USER"

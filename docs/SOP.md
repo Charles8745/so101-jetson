@@ -405,6 +405,7 @@ Always quote the 120 Hz figure, and always say whether it is corrected.
 | a camera is missing from `so101 devices` | `lsusb -t` — the kernel has not enumerated it. Not a code problem |
 | pre-flight `[3]` fails | the arms are swapped, or `devices.env` is stale |
 | the picture is upside down | `ROTATE_<NAME>` in `devices.env` |
+| `QFontDatabase: Cannot find font directory .../cv2/qt/fonts` | a warning, not a fault — see below. The recording is unaffected |
 | the arm faults with a tracking error | the follower could not keep up or is obstructed. It is holding torque — press Enter |
 | everything looks fine but the data is wrong | check `<cam>_first.jpg`: are the camera labels the right way round? |
 
@@ -420,6 +421,29 @@ down instead of guessing:
 ```sh
 so101 ping --repeat 20
 ```
+
+### `QFontDatabase: Cannot find font directory`
+
+Harmless, and it does **not** touch the recording. OpenCV ships its own Qt
+build with no fontconfig, so it looks for fonts in one hard-coded directory
+inside the `cv2` package and complains when they are not there. What goes
+unstyled is OpenCV's own window chrome. Every character p2 draws *on the
+picture* — the camera names, the status bar — uses `cv2.FONT_HERSHEY_SIMPLEX`,
+OpenCV's built-in vector font, which has nothing to do with Qt.
+
+`install.sh` now puts the fonts where it looks. On a machine installed before
+that, do it once:
+
+```sh
+sudo apt-get install -y fonts-dejavu-core
+so101 python -c "import cv2,os,glob,shutil; d=os.path.join(os.path.dirname(cv2.__file__),'qt','fonts'); os.makedirs(d,exist_ok=True); print(len([shutil.copy(f,d) for f in glob.glob('/usr/share/fonts/truetype/dejavu/DejaVuSans*.ttf')]),'fonts ->',d)"
+```
+
+It asks `cv2` where it lives rather than writing the path down, so it works
+whichever virtualenv you are on. A `pip install opencv-python` later will
+remove them again; re-run it if the warning comes back.
+
+---
 
 All six ids on both arms should answer. A missing id is that servo or the
 daisy-chain cable feeding it — and the chain runs 1→2→3→4→5→6, so a bad cable
