@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# The one command for this station.  Put bin/ on your PATH once and you never
+# type a python path, a script path, or a device path again:
+#
+#     so101 p1 --duration 20        (or just:  p1 --duration 20)
+#     so101 devices
+#     so101 latency
+#     so101 env                     <- run this first when something is wrong
+#
+# What it does for you, every time, before running anything:
+#   1. finds the repo, no matter where you are or how you got here
+#   2. sources devices.env, so LEADER / FOLLOWER / CAM_* / ROTATE_* are set
+#   3. finds the virtualenv -- install.sh makes ~/so101venv, but the original
+#      Jetson was set up by hand before install.sh existed and has ~/step0venv
+#
+# None of this is done silently. `so101 env` prints every choice it made,
+# because a launcher that quietly picks a different python or a stale
+# devices.env is worse than one that makes you type the path yourself.
+
+# --- 1. where am I ----------------------------------------------------------
+# Resolve symlinks by hand rather than with `readlink -f`, so this still works
+# if bin/ is ever linked into /usr/local/bin from somewhere else.
+_self="${BASH_SOURCE[0]}"
+case "$_self" in */*) ;; *) _self="./$_self" ;; esac
+while [ -L "$_self" ]; do
+  _link="$(readlink "$_self")"
+  case "$_link" in
+    /*) _self="$_link" ;;
+     *) _self="${_self%/*}/$_link" ;;
+  esac
+done
+BIN="$(cd -- "${_self%/*}" && pwd)" || exit 1
+REPO="$(cd -- "$BIN/.." && pwd)" || exit 1
+
+# --- 2. devices.env ---------------------------------------------------------
+# Sourced BEFORE the venv search on purpose: devices.env may export its own PY,
+# and the machine's own answer should win over ours.
+DEVICES_ENV="$REPO/devices.env"
+DEVICES_STATE=missing
+if [ -f "$DEVICES_ENV" ]; then
+  # stdout is dropped (the example file announces itself on every command);
+  # stderr is NOT, or a typo in devices.env fails silently and confusingly.
+  . "$DEVICES_ENV" >/dev/null
+  DEVICES_STATE=loaded
+fi
+
+# --- 3. which python --------------------------------------------------------
+# An explicit ordered loop, not `ls ... | head -1`: ls sorts its output, so the
+# list would be searched in alphabetical order rather than the order written.
+PY_FROM=devices.env
+if [ -z "${PY:-}" ]; then
+  PY_FROM=search
+  for _cand in "$HOME/so101venv/bin/python" \
+               "$HOME/step0venv/bin/python" \
+               "$REPO/.venv/bin/python"; do
+    if [ -x "$_cand" ]; then PY="$_cand"; break; fi
+  done
+fi
+[ -n "${PY:-}" ] && [ ! -x "$PY" ] && PY=""
+
+need_py() {
+  if [ -z "${PY:-}" ]; then
+    echo "so101: no virtualenv found." >&2
+    echo "       looked for: ~/so101venv, ~/step0venv, $REPO/.venv" >&2
+    echo "       fix it with:  bash $REPO/setup/install.sh" >&2
+    exit 1
+  fi
+}
+
+need_devices() {
+  if [ "$DEVICES_STATE" = missing ]; then
+    echo "so101: no devices.env -- ports, cameras and rotations are not set." >&2
+    echo "       cp $REPO/setup/devices.example.env $REPO/devices.env" >&2
+    echo "       then edit it, filling the values in from:  so101 devices" >&2
+    exit 1
+  fi
+}
+
+# Programs write their logs to ./logs/pN, so run them from the repo. Otherwise
+# a run started from your home directory hides its data in ~/logs and `so101
+# latency` -- which looks under the repo -- reports on the wrong run.
+run_program() { need_py; need_devices; cd "$REPO" || exit 1; exec "$PY" "$REPO/$1" "${@:2}"; }
+run_tool()    { need_py;                                    exec "$PY" "$REPO/$1" "${@:2}"; }
+
+usage() {
+  cat <<USAGE
+so101 -- SO-101 station
+
+  so101 p1 [args]        leader drives follower, logs the arm
+  so101 p2 [args]        the same, plus both cameras recording and on screen
+  so101 p3 [args]        leader drives the simulated arm on Spark
+
+  so101 devices          list the arms and cameras plugged in right now
+  so101 ping             ask every servo on both arms to answer (energises nothing)
+  so101 calibrate leader|follower
+  so101 latency [run]    latency report; with no argument, the newest p1 run
+  so101 simmap [args]    build / check the real-to-sim joint map
+  so101 selftest         run the unit tests
+  so101 loopback         run p3's protocol against a fake simulator
+
+  so101 env              show which python, which devices.env, what is plugged in
+  so101 python [args]    the station's python, for one-off snippets
+
+p1, p2 and p3 also work as bare commands:  p1 --duration 20
+Every subcommand passes --help through:    so101 p2 --help
+USAGE
+}
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift
+
+case "$cmd" in
+  p1)  run_program programs/p1_follow_leader.py   "$@" ;;
+  p2)  run_program programs/p2_record_cameras.py  "$@" ;;
+  p3)  run_program programs/p3_teleop_sim.py      "$@" ;;
+
+  devices)  run_tool tools/list_devices.py    "$@" ;;
+  ping)     run_tool tools/ping_bus.py       "$@" ;;
+  simmap)   run_tool tools/simmap_init.py     "$@" ;;
+  selftest) run_tool tools/selftest.py        "$@" ;;
+  loopback) run_tool tools/loopback_test.py   "$@" ;;
+  python)   need_py; exec "$PY" "$@" ;;
+
+  latency)
+    need_py
+    if [ $# -gt 0 ]; then exec "$PY" "$REPO/tools/analyze_latency.py" "$@"; fi
+    latest="$(ls -dt "$REPO"/logs/p1/*/ 2>/dev/null | head -1)"
+    if [ -z "$latest" ]; then
+      echo "so101: no runs under $REPO/logs/p1 yet." >&2
+      echo "       run one first:  p1 --duration 20" >&2
+      echo "       or name a file: so101 latency path/to/rows.jsonl" >&2
+      exit 1
+    fi
+    echo "so101: analysing ${latest%/}"
+    exec "$PY" "$REPO/tools/analyze_latency.py" "${latest}rows.jsonl"
+    ;;
+
+  calibrate)
+    # Wrapped because the flags are a trap: the FOLLOWER is --robot.* and the
+    # LEADER is --teleop.*, and lerobot enables torque on whatever it thinks is
+    # a robot. Point --robot.port at the leader by hand and you have just
+    # powered the arm you are about to grab.
+    need_py; need_devices
+    case "${1:-}" in
+      follower)
+        [ -n "${FOLLOWER:-}" ] || { echo "so101: FOLLOWER is not set in devices.env" >&2; exit 1; }
+        exec "$(dirname "$PY")/lerobot-calibrate" \
+          --robot.type=so_follower --robot.port="$FOLLOWER" --robot.id=my_follower ;;
+      leader)
+        [ -n "${LEADER:-}" ] || { echo "so101: LEADER is not set in devices.env" >&2; exit 1; }
+        exec "$(dirname "$PY")/lerobot-calibrate" \
+          --teleop.type=so_leader --teleop.port="$LEADER" --teleop.id=my_leader ;;
+      *)
+        echo "usage: so101 calibrate leader|follower" >&2; exit 1 ;;
+    esac
+    ;;
+
+  env)
+    echo "repo         $REPO"
+    case "$DEVICES_STATE" in
+      loaded)  echo "devices.env  $DEVICES_ENV" ;;
+      missing) echo "devices.env  MISSING -- cp setup/devices.example.env devices.env" ;;
+    esac
+    if [ -n "${PY:-}" ]; then
+      echo "python       $PY   (from $PY_FROM)"
+      # One python for all three probes. The opencv one reads the BUILD INFO
+      # rather than asking whether cv2.imshow exists: the headless wheel
+      # defines imshow too and only fails when you call it, so an attribute
+      # check reports a working display right up until p2 opens a window.
+      "$PY" - <<'PROBE'
+import re, sys
+P = "             "
+print(P + "python  " + ".".join(map(str, sys.version_info[:3])))
+try:
+    import lerobot
+    print(P + "lerobot " + getattr(lerobot, "__version__", "?"))
+except Exception:
+    print(P + "lerobot NOT INSTALLED -- bash setup/install.sh")
+try:
+    import cv2
+except Exception:
+    print(P + "opencv  NOT INSTALLED -- bash setup/install.sh")
+    raise SystemExit
+info = cv2.getBuildInformation()
+gui = ""
+m = re.search(r"^\s*GUI:\s*(.+?)\s*$", info, re.M)
+if m and m.group(1) not in ("", "NONE"):
+    gui = m.group(1)
+else:
+    for tk in ("GTK+", "GTK", "QT", "COCOA", "WIN32UI"):
+        if re.search(r"^\s*" + re.escape(tk) + r":\s*YES", info, re.M):
+            gui = tk
+            break
+print(P + "opencv  " + cv2.__version__ + "  " +
+      (gui if gui else "NO GUI BACKEND -- p2 cannot show a window"))
+PROBE
+    else
+      echo "python       NONE FOUND -- bash setup/install.sh"
+    fi
+    echo
+    for _v in LEADER FOLLOWER CAM_WRIST CAM_FRONT; do
+      eval "_p=\"\${$_v:-}\""
+      if   [ -z "$_p" ];  then printf '%-16s unset\n' "$_v"
+      elif [ -e "$_p" ];  then printf '%-16s ok         %s\n' "$_v" "$_p"
+      else                     printf '%-16s NOT THERE  %s\n' "$_v" "$_p"
+      fi
+    done
+    for _v in LEADER_SERIAL FOLLOWER_SERIAL ROTATE_WRIST ROTATE_FRONT; do
+      eval "_p=\"\${$_v:-}\""
+      printf '%-16s %s\n' "$_v" "${_p:-unset}"
+    done
+    ;;
+
+  help|-h|--help) usage ;;
+  *) echo "so101: no such command: $cmd" >&2; echo >&2; usage >&2; exit 1 ;;
+esac

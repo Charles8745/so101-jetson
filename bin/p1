@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Short form of `so101 p1`. All the work is in bin/so101; this only finds it.
+_self="${BASH_SOURCE[0]}"
+case "$_self" in */*) ;; *) _self="./$_self" ;; esac
+while [ -L "$_self" ]; do
+  _link="$(readlink "$_self")"
+  case "$_link" in
+    /*) _self="$_link" ;;
+     *) _self="${_self%/*}/$_link" ;;
+  esac
+done
+exec "${_self%/*}/so101" p1 "$@"

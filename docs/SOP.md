@@ -7,6 +7,12 @@ so and tells you what "right" looks like.
 Reference machine: Jetson Orin Nano Super, JetPack 7.2.1 / Ubuntu 24.04 /
 Python 3.12. Any Linux box with the same hardware attached will do.
 
+**Every command here is a bare word — `p1`, `p2`, `so101 devices` — and works
+from any directory.** They are the launchers in `bin/`, which `install.sh` puts
+on your PATH (§1). Each one finds the virtualenv, loads `devices.env`, and runs
+the program from the repo so the logs always land in the same place. You never
+type a python path, a script path, or `source devices.env` again.
+
 ---
 
 ## What the two programs are for
@@ -39,7 +45,7 @@ one component on its own is the whole reason there are separate programs.
 
 ## 1. Install
 
-```
+```sh
 git clone https://github.com/Charles8745/so101-jetson.git
 cd so101-jetson
 bash setup/install.sh
@@ -55,27 +61,34 @@ breaks JetPack's pinned CUDA/L4T stack.
 `newgrp dialout` is not optional — without it every serial open fails with a
 permission error that looks like a broken cable.
 
-### Which python
+The last step adds `bin/` to your PATH in `~/.bashrc`. **Open a new terminal**
+before going on — that is what picks up both the PATH and `dialout`.
+
+### Which python — you do not choose
 
 `install.sh` makes `~/so101venv`. The **original Jetson** was set up by hand
-before `install.sh` existed and has `~/step0venv` instead. So this SOP never
-writes the path out: `devices.env` finds it once and exports `$PY`, and every
-command below runs as `$PY programs/...`.
+before `install.sh` existed and has `~/step0venv` instead. The launchers look
+for both, in that order, so the same command works on either machine. Nothing
+in this SOP writes an interpreter path.
 
-If your `devices.env` predates this, add these lines to it:
+To see which one you actually got, along with everything else the launcher
+decided:
 
+```sh
+so101 env
 ```
-export PY="$(ls -d "$HOME"/so101venv/bin/python "$HOME"/step0venv/bin/python 2>/dev/null | head -1)"
-echo "PY=$PY"
-```
 
-`source devices.env` should then print a path. If it prints nothing, the
-virtualenv is missing — run `bash setup/install.sh`.
+That prints the repo, the `devices.env` in use, the interpreter and where it
+came from, the lerobot and OpenCV versions, and whether each arm and camera path
+in `devices.env` exists **right now**. Run it first whenever something is wrong;
+it turns most "it does not work" into one line.
+
+`so101` on its own lists every command.
 
 ### Check it took
 
-```
-python3 tools/selftest.py | tail -1
+```sh
+so101 selftest | tail -1
 ```
 
 **Expect `ALL PASS` and 28 checks.** These tests deliberately need no arm, no
@@ -87,7 +100,7 @@ can go and look at the hardware instead.
 
 ## 2. Put the calibration where lerobot looks for it
 
-```
+```sh
 mkdir -p ~/.cache/huggingface/lerobot/calibration/robots/so_follower
 mkdir -p ~/.cache/huggingface/lerobot/calibration/teleoperators/so_leader
 cp my_follower.json ~/.cache/huggingface/lerobot/calibration/robots/so_follower/
@@ -96,20 +109,24 @@ cp my_leader.json   ~/.cache/huggingface/lerobot/calibration/teleoperators/so_le
 
 Verify — this should print a path, `True`, and `6`:
 
-```
-$PY -c "from lerobot.robots.so_follower import SOFollower,SOFollowerRobotConfig as C; r=SOFollower(C(port='/dev/null',id='my_follower')); print(r.calibration_fpath, r.calibration_fpath.is_file(), len(r.calibration))"
+```sh
+so101 python -c "from lerobot.robots.so_follower import SOFollower,SOFollowerRobotConfig as C; r=SOFollower(C(port='/dev/null',id='my_follower')); print(r.calibration_fpath, r.calibration_fpath.is_file(), len(r.calibration))"
 ```
 
 ### 2b. Only if these are DIFFERENT arms
 
-```
-source devices.env
-$(dirname $PY)/lerobot-calibrate --robot.type=so_follower --robot.port="$FOLLOWER" --robot.id=my_follower
-$(dirname $PY)/lerobot-calibrate --teleop.type=so_leader  --teleop.port="$LEADER"   --teleop.id=my_leader
+```sh
+so101 calibrate follower
+so101 calibrate leader
 ```
 
 (Do §3 first so `devices.env` exists — the ports have to be right before you
 calibrate, or you will calibrate the wrong arm.)
+
+Use these rather than calling `lerobot-calibrate` yourself. Its flags are a
+trap: the follower is `--robot.*` and the leader is `--teleop.*`, and lerobot
+**enables torque** on whatever it is told is a robot. Point `--robot.port` at
+the leader by hand and you have just powered the arm you are about to grab.
 
 Calibration writes an offset into each servo's EEPROM **and** the JSON file, and
 pre-flight later compares the two. So the file alone is not enough: a file
@@ -123,8 +140,8 @@ what before overwriting the reference.
 
 ## 3. Plug the hardware in and write down what is where
 
-```
-python3 tools/list_devices.py
+```sh
+so101 devices
 ```
 
 You get the arms' **by-id** paths (which carry a USB serial) and the cameras'
@@ -136,13 +153,13 @@ You get the arms' **by-id** paths (which carry a USB serial) and the cameras'
 serial in the by-id path is the real identity. To find out which serial is the
 leader, unplug it and see which one disappears:
 
-```
+```sh
 ls /dev/serial/by-id/ > /tmp/before.txt ; cat /tmp/before.txt
 ```
 
 Now **unplug the leader's USB cable** (the arm you can turn freely by hand), then:
 
-```
+```sh
 ls /dev/serial/by-id/ > /tmp/after.txt
 echo "--- this one is the LEADER ---" ; comm -23 /tmp/before.txt /tmp/after.txt
 echo "--- this one is the FOLLOWER ---" ; cat /tmp/after.txt
@@ -162,15 +179,14 @@ The cameras are the same model with no serial number, so **the only thing
 telling them apart is which socket they are in**. Grab one frame from each and
 look:
 
-```
+```sh
 cp setup/devices.example.env devices.env
 ```
 
-Edit `devices.env` with the values `list_devices.py` printed, then:
+Edit `devices.env` with the values `so101 devices` printed, then:
 
-```
-source devices.env
-$PY programs/p2_record_cameras.py --no-arm --duration 3
+```sh
+p2 --no-arm --duration 3
 ```
 
 Open the two `logs/p2/<timestamp>/*_first.jpg` files. **The wrist camera is the
@@ -182,7 +198,7 @@ again. Re-check the snapshots whenever anything is unplugged.
 
 ### A finished `devices.env`
 
-```
+```sh
 export LEADER=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79050417-if00
 export FOLLOWER=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79050450-if00
 export LEADER_SERIAL=5B79050417
@@ -201,7 +217,10 @@ the same picture. Correcting it only in the viewer is the trap: the recording
 stays upside down and nobody notices until a policy is trained on it.
 
 **Those values are the reference Jetson's. Yours will differ.** Fill in what
-`list_devices.py` prints on your machine.
+`so101 devices` prints on your machine.
+
+Check it with `so101 env`: every path should say `ok`. `NOT THERE` means that
+device is unplugged, or in a different socket than the one written down.
 
 ---
 
@@ -214,9 +233,8 @@ Before you touch the keyboard:
 2. Turn the leader **by hand** so it roughly matches the follower's pose.
 3. Keep a hand near the power.
 
-```
-source devices.env
-$PY programs/p1_follow_leader.py --duration 20
+```sh
+p1 --duration 20
 ```
 
 An 8-point pre-flight runs first and prints every check. It refuses to start on
@@ -241,12 +259,12 @@ away from a faulted arm.
 
 ### Then measure the latency
 
-```
-$PY tools/analyze_latency.py "logs/p1/$(ls -t logs/p1 | head -1)/rows.jsonl"
+```sh
+so101 latency
 ```
 
-(That picks the most recent run. Name the directory explicitly if you want an
-older one.)
+(With no argument that is the most recent p1 run, and it prints which one it
+picked. Pass a `rows.jsonl` path for an older one.)
 
 Move **every one of the six joints** back and forth during the run, or the ones
 that did not move get skipped and there is nothing to correlate.
@@ -255,19 +273,16 @@ that did not move get skipped and there is nothing to correlate.
 
 ## 5. Program 2 — arm and cameras together
 
-```
-source devices.env
-$PY programs/p2_record_cameras.py \
-    --fourcc MJPG --width 1024 --height 768 --fps 30 --arm-fps 120 \
-    --max-step-deg 2 --max-step-gripper-pct 3.75 \
-    --power-line-hz 60 --display on --duration 60
+```sh
+p2 --fourcc MJPG --width 1024 --height 768 --fps 30 --arm-fps 120 \
+   --max-step-deg 2 --max-step-gripper-pct 3.75 \
+   --power-line-hz 60 --display on --duration 60
 ```
 
 Cameras only:
 
-```
-$PY programs/p2_record_cameras.py --no-arm \
-    --power-line-hz 60 --duration 60
+```sh
+p2 --no-arm --power-line-hz 60 --duration 60
 ```
 
 Output in `logs/p2/<timestamp>/`: `<cam>.avi`, `cam_rows.jsonl`,
@@ -351,9 +366,11 @@ Always quote the 120 Hz figure, and always say whether it is corrected.
 
 | symptom | first thing to do |
 |---|---|
+| `p1: command not found` | the PATH line has not taken. Open a new terminal, or `source ~/.bashrc`. `which so101` should print a path inside the repo |
+| a command runs but uses the wrong python or stale ports | `so101 env` — it prints every choice it made and where each came from |
 | any serial open fails | did you run `newgrp dialout`, or log out and back in? |
-| `no status packet` on one motor id | it is a servo not answering. Ping the bus (below). It has happened once, transiently, on the follower's `wrist_roll` — unexplained |
-| a camera is missing from `list_devices.py` | `lsusb -t` — the kernel has not enumerated it. Not a code problem |
+| `no status packet` on one motor id | it is a servo not answering. Run `so101 ping --repeat 20`. It has happened once, transiently, on the follower's `wrist_roll` — unexplained |
+| a camera is missing from `so101 devices` | `lsusb -t` — the kernel has not enumerated it. Not a code problem |
 | pre-flight `[3]` fails | the arms are swapped, or `devices.env` is stale |
 | the picture is upside down | `ROTATE_<NAME>` in `devices.env` |
 | the arm faults with a tracking error | the follower could not keep up or is obstructed. It is holding torque — press Enter |
@@ -361,31 +378,25 @@ Always quote the 120 Hz figure, and always say whether it is corrected.
 
 Ping every servo without energising anything:
 
+```sh
+so101 ping
 ```
-source devices.env
-$PY - <<'PY'
-import os
-from lerobot.robots.so_follower import SOFollower, SOFollowerRobotConfig
-from lerobot.teleoperators.so_leader import SOLeader, SOLeaderTeleopConfig
-for label, obj in (
-    ("FOLLOWER", SOFollower(SOFollowerRobotConfig(port=os.environ["FOLLOWER"],
-                            id="my_follower", use_degrees=True))),
-    ("LEADER", SOLeader(SOLeaderTeleopConfig(port=os.environ["LEADER"],
-                        id="my_leader", use_degrees=True)))):
-    bus = obj.bus
-    print(label, {n: m.id for n, m in bus.motors.items()})
-    try:
-        bus.connect(handshake=False)
-    except TypeError:
-        bus.connect()
-    print("  answering:", bus.broadcast_ping())
-    bus.disconnect()
-PY
+
+If the fault is intermittent — a connect that fails once and then works — pin it
+down instead of guessing:
+
+```sh
+so101 ping --repeat 20
 ```
 
 All six ids on both arms should answer. A missing id is that servo or the
 daisy-chain cable feeding it — and the chain runs 1→2→3→4→5→6, so a bad cable
-between 4 and 5 takes 5 *and* 6 with it.
+between 4 and 5 takes 5 *and* 6 with it. `so101 ping` says so when the missing
+ids are consecutive.
+
+The servo logic is USB-powered, so **an arm with no power supply answers exactly
+like one with power.** A clean ping does not mean the follower can hold itself
+up.
 
 ---
 

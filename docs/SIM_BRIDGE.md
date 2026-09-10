@@ -106,10 +106,10 @@ There is no reason those zeros coincide and no reason the axes agree.
 ## Setup, once per model
 
 **On Spark**
-```
+```sh
 python3 sim/probe_isaac.py
-python3 sim/probe_isaac.py --stage limits --usd <so101.usd> \
-    --joints shoulder_pan=<usd_name>,shoulder_lift=<usd_name>,elbow_flex=<usd_name>,wrist_flex=<usd_name>,wrist_roll=<usd_name>,gripper=<usd_name> \
+python3 sim/probe_isaac.py --stage limits --usd "<so101.usd>" \
+    --joints shoulder_pan="<usd_name>",shoulder_lift="<usd_name>",elbow_flex="<usd_name>",wrist_flex="<usd_name>",wrist_roll="<usd_name>",gripper="<usd_name>" \
     --out sim_limits.json
 ```
 `--stage limits` reads the limits out of the **USD schema** with `pxr`, not
@@ -118,48 +118,48 @@ need a SimulationApp. UsdPhysics stores revolute limits in degrees; the JSON is
 in radians and says so.
 
 **On the Jetson** (copy `sim_limits.json` over)
-```
-python3 tools/simmap_init.py fit --arm-role leader --arm-id my_leader \
+```sh
+so101 simmap fit --arm-role leader --arm-id my_leader \
     --sim-limits sim_limits.json --out configs/simmap_leader.json
-python3 tools/simmap_init.py show --map configs/simmap_leader.json
+so101 simmap show --map configs/simmap_leader.json
 ```
 
 **Check the signs**, then
-```
-python3 tools/simmap_init.py fit ... --flip elbow_flex,wrist_roll   # if needed
-python3 tools/simmap_init.py verify --map configs/simmap_leader.json \
-    --by <you> --method visual --note "<what you actually checked>"
+```sh
+so101 simmap fit ... --flip elbow_flex,wrist_roll   # if needed
+so101 simmap verify --map configs/simmap_leader.json \
+    --by "<you>" --method visual --note "<what you actually checked>"
 ```
 
 ## Running
 
 **Spark**
-```
-python3 sim/receiver.py --backend isaac --map configs/simmap_leader.json --usd <so101.usd>
+```sh
+python3 sim/receiver.py --backend isaac --map configs/simmap_leader.json --usd "<so101.usd>"
 ```
 **Jetson**
-```
-python3 programs/p3_teleop_sim.py --leader-port $LEADER \
-    --map configs/simmap_leader.json --sim <spark-ip>
+```sh
+p3 --leader-port $LEADER \
+    --map configs/simmap_leader.json --sim "<spark-ip>"
 ```
 Keys: `s` start episode, `e` end and keep, `d` discard, `q` quit, Enter status.
 
 ### Without Isaac, without Spark, without an arm
-```
-python3 tools/loopback_test.py            # the whole bridge, against itself
-python3 tools/loopback_test.py --sim-fps 10
+```sh
+so101 loopback            # the whole bridge, against itself
+so101 loopback --sim-fps 10
 ```
 ### Without Isaac, with the real arm (both on the Jetson)
-```
+```sh
 python3 sim/receiver.py --backend echo --map configs/simmap_leader.json   # term 1
-python3 programs/p3_teleop_sim.py --sim 127.0.0.1 ...                     # term 2
+p3 --sim 127.0.0.1 ...                     # term 2
 ```
 The echo backend reports `readback=False` and p3 says so: **the link is proven,
 the mapping is not.** Echo hands our own numbers back; it cannot check a map.
 
 ### With neither
-```
-python3 programs/p3_teleop_sim.py --no-sim --leader-port $LEADER --map ...
+```sh
+p3 --no-sim --leader-port $LEADER --map ...
 ```
 Reads the arm, applies the map, logs locally. Checks the arm and the map with no
 network at all.
