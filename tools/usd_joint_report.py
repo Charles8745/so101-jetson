@@ -1,8 +1,24 @@
 #!/usr/bin/env python3
 """What a USD asset ACTUALLY contains, per joint, in BOTH unit spellings.
 
-Needs only `pxr` (usd-core). No SimulationApp, no GPU, no five minute startup,
-and nothing that changes when Isaac is upgraded.
+Needs `pxr`. Where it comes from depends on the machine, and on Spark the
+obvious answer is wrong, so the tool works it out and says which route it took.
+
+    --via direct   plain `import pxr`. Works wherever usd-core is installed:
+                   a Mac, an x86_64 box, a container.
+    --via kit      start a headless SimulationApp first, then import. Kit puts
+                   USD's python bindings on sys.path at startup; before that
+                   they are not on disk anywhere the import system can see.
+    --via auto     (default) direct, then kit.
+
+** `pip install usd-core` does not work on Spark. ** PyPI ships no Linux
+aarch64 wheel for it (x86_64, macOS universal2 and win_amd64 only), so pip
+falls through to building all of USD from source. Spark is Grace ARM. On that
+machine `--via kit` is the only route, and it costs about fifteen seconds of
+Kit startup for what is otherwise a schema read.
+
+Whichever route runs, the tool prints where pxr actually came from. That is the
+one fact nobody had written down.
 
 Why this tool exists
 --------------------
@@ -44,6 +60,7 @@ Three modes
 Usage
 -----
     python3 tools/usd_joint_report.py --usd so101.usda
+    ./python.sh tools/usd_joint_report.py --via kit --usd so101.usda
     python3 tools/usd_joint_report.py --usd new.usda --compare old.usda
     python3 tools/usd_joint_report.py --usd new.usda --mjcf so101_new_calib.xml
     python3 tools/usd_joint_report.py --usd so101.usda --json report.json
@@ -74,6 +91,56 @@ def _fail(msg):
     return 2
 
 
+_KIT_APP = None
+
+
+def ensure_pxr(via="auto"):
+    """Make `pxr` importable and say how. Returns (route, path_to_pxr).
+
+    Kit only extends sys.path once it is running, so on a machine without
+    usd-core the import cannot succeed before SimulationApp has started. That
+    is not a bug to work around; it is the load order, and pretending otherwise
+    produces a ModuleNotFoundError three call frames from anything meaningful.
+    """
+    global _KIT_APP
+
+    if via in ("auto", "direct"):
+        try:
+            import pxr
+            return "direct", getattr(pxr, "__file__", "?")
+        except ImportError:
+            if via == "direct":
+                raise RuntimeError(
+                    "no pxr, and --via direct forbids starting Kit. Install "
+                    "usd-core (x86_64 / macOS only -- there is no Linux "
+                    "aarch64 wheel), or use --via kit.")
+
+    try:
+        from isaacsim import SimulationApp
+    except ImportError:
+        raise RuntimeError(
+            "no pxr and no isaacsim either. On Spark run this with "
+            "IsaacSim/_build/linux-aarch64/release/python.sh, and "
+            "`conda deactivate` first or python.sh refuses to use its own "
+            "interpreter. Elsewhere, pip install usd-core.")
+
+    print("starting a headless SimulationApp purely to get pxr on sys.path "
+          "(about 15 s) ...", flush=True)
+    _KIT_APP = SimulationApp({"headless": True})
+    import pxr
+    return "simulation_app", getattr(pxr, "__file__", "?")
+
+
+def close_pxr():
+    global _KIT_APP
+    if _KIT_APP is not None:
+        try:
+            _KIT_APP.close()
+        except Exception:
+            pass
+        _KIT_APP = None
+
+
 def _attr(prim, name):
     a = prim.GetAttribute(name)
     if not a or not a.IsValid():
@@ -95,7 +162,7 @@ def _find_attrs(prim, hints):
 
 
 def read_usd(path):
-    from pxr import Usd, UsdPhysics
+    from pxr import Usd, UsdPhysics  # ensure_pxr() has already run
 
     if not os.path.isfile(path):
         raise RuntimeError(f"no such file: {path}")
@@ -455,6 +522,8 @@ def main():
     ap.add_argument("--compare", metavar="OTHER.usd")
     ap.add_argument("--mjcf", metavar="MODEL.xml")
     ap.add_argument("--json", metavar="OUT.json")
+    ap.add_argument("--via", choices=("auto", "direct", "kit"), default="auto",
+                    help="how to get pxr (default auto: direct, then Kit)")
     ap.add_argument("--tol-deg", type=float, default=1e-6,
                     help="limit-comparison tolerance, degrees (default 1e-6)")
     ap.add_argument("--tol-rel", type=float, default=1e-4,
@@ -467,11 +536,11 @@ def main():
     rep = None
     if args.usd:
         try:
+            route, where = ensure_pxr("kit" if args.via == "kit" else args.via)
+            print(f"pxr via {route}: {where}\n")
             rep = read_usd(args.usd)
-        except ImportError:
-            return _fail("cannot import pxr. Run with Isaac's python.sh, or "
-                         "pip install usd-core.")
         except Exception as e:
+            close_pxr()
             return _fail(f"{type(e).__name__}: {e}")
 
     rc = 0
@@ -507,6 +576,7 @@ def main():
             json.dump(blob, f, indent=2, sort_keys=True)
         print(f"\nwrote {args.json}")
 
+    close_pxr()
     return rc
 
 

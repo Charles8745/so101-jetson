@@ -113,9 +113,46 @@ python3 sim/probe_isaac.py --stage limits --usd "<so101.usd>" \
     --out sim_limits.json
 ```
 `--stage limits` reads the limits out of the **USD schema** with `pxr`, not
-through any Isaac API, so it does not depend on the Isaac version and does not
-need a SimulationApp. UsdPhysics stores revolute limits in degrees; the JSON is
-in radians and says so.
+through any Isaac API, so it does not depend on the Isaac version. UsdPhysics
+stores revolute limits in degrees; the JSON is in radians and says so.
+
+### Getting `pxr` on Spark
+
+Measured 2026-09-10, because two of the three obvious answers are wrong there:
+
+| | |
+| --- | --- |
+| `pip install usd-core` | **No.** PyPI has no Linux aarch64 wheel (x86_64, macOS and Windows only) and Spark is Grace ARM, so pip falls through to building all of USD from source. Fine on a Mac or an x86_64 box. |
+| `python.sh` on its own | **No.** There is no `pxr` directory anywhere in the Isaac release tree, and sourcing `setup_python_env.sh` does not add one. |
+| `python.sh` **after Kit starts** | **Yes.** Kit puts USD's python bindings on `sys.path` when `SimulationApp` starts. About 15 s. |
+
+Two things bite before you get that far:
+
+```sh
+conda deactivate
+"$HOME/IsaacSim/_build/linux-aarch64/release/python.sh" tools/usd_joint_report.py --via kit --usd "$HOME/so101_usd/so101_new_calib/so101_new_calib.usda"
+```
+
+`python.sh` refuses to use its own interpreter while a conda env is active --
+it warns and falls back to the system python, which has no `pxr`, so the error
+you see names `pxr` and not conda. And Spark has no `bin/` on PATH, so the
+Jetson's `so101` launcher is not available: run the scripts by path.
+
+## Reading an asset back
+
+```sh
+python3 tools/usd_joint_report.py --usd asset.usda --mjcf model.xml
+```
+
+Every angular gain is printed per **degree** and per **radian** on the same
+line. UsdPhysics stores an angular drive's stiffness per degree; PhysX and
+`get_gains()` use radians; they differ by 57.29578 and both are called `kp`.
+Writing a radian-native MuJoCo gain straight into the USD field is a silent
+57x error, and it is the one that cost 2026-09-08 and 09.
+
+`--compare other.usda` diffs two assets structurally. Run it before swapping
+the asset under a fitted simmap: the map is pinned to joint names, types and
+limits, and if one of those moved the map quietly stops meaning what it meant.
 
 **On the Jetson** (copy `sim_limits.json` over)
 ```sh
