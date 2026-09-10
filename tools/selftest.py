@@ -898,6 +898,66 @@ def test_a_degree_native_mjcf_is_refused_not_guessed():
     print("ok  a degree-native mjcf is refused, not guessed")
 
 
+
+def test_the_unit_conversion_lives_in_exactly_one_place():
+    """The tool that WRITES the gains and the tool that CHECKS them must use
+    the same arithmetic. Two copies of a unit conversion is how they drift,
+    and this repo has already paid for that once: 2026-09-08 wrote a
+    radian-native gain into a per-degree field and nothing disagreed with it,
+    because nothing else was looking.
+
+    Checked against the parsed code, not the text -- the file is allowed to
+    TALK about 57.29578, it just may not compute it."""
+    import ast as _ast
+    path = os.path.join(ROOT, "tools", "usd_apply_mjcf_gains.py")
+    src = pathlib.Path(path).read_text()
+    assert "expected_from_mjcf" in src, "the writer must reuse the resolver"
+
+    tree = _ast.parse(src)
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Constant) and isinstance(node.value, float):
+            assert not (57.0 < node.value < 58.0), (
+                f"usd_apply_mjcf_gains.py has the conversion factor "
+                f"{node.value} as a literal. Use "
+                f"usd_joint_report.DEG_PER_RAD.")
+        if isinstance(node, _ast.Attribute) and node.attr in (
+                "degrees", "radians", "pi"):
+            base = getattr(node.value, "id", None)
+            assert base != "math", (
+                f"usd_apply_mjcf_gains.py calls math.{node.attr} -- it must "
+                f"not do its own angle conversion.")
+    print("ok  the unit conversion lives in exactly one place")
+
+
+def test_pxr_routing_refuses_clearly_when_there_is_no_pxr():
+    """Both wrong answers were given to a real person on a real machine before
+    this module existed, so the refusals name the machine and the fix."""
+    import builtins
+    from common.usd_env import ensure_pxr
+
+    real = builtins.__import__
+
+    def no_pxr(name, *a, **k):
+        if name == "pxr" or name.startswith("pxr."):
+            raise ImportError("no pxr here")
+        if name == "isaacsim":
+            raise ImportError("no isaacsim here")
+        return real(name, *a, **k)
+
+    builtins.__import__ = no_pxr
+    try:
+        for via, must in (("direct", "aarch64"), ("auto", "conda deactivate")):
+            try:
+                ensure_pxr(via)
+            except RuntimeError as e:
+                assert must in str(e), f"{via}: message lost {must!r}: {e}"
+            else:
+                raise AssertionError(f"{via}: no pxr, yet it did not refuse")
+    finally:
+        builtins.__import__ = real
+    print("ok  pxr routing refuses clearly when there is no pxr")
+
+
 def test_every_pasteable_command_in_the_docs_actually_parses():
     """A ```sh block in docs/ must survive being pasted into a shell.
 
@@ -1120,6 +1180,8 @@ if __name__ == "__main__":
     test_a_radian_gain_in_a_degree_field_is_off_by_57()
     test_mjcf_element_attributes_beat_the_class_default()
     test_a_degree_native_mjcf_is_refused_not_guessed()
+    test_the_unit_conversion_lives_in_exactly_one_place()
+    test_pxr_routing_refuses_clearly_when_there_is_no_pxr()
     test_every_pasteable_command_in_the_docs_actually_parses()
     test_the_launchers_parse_and_point_at_files_that_exist()
     print("ALL PASS")

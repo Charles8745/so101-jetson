@@ -72,6 +72,9 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.usd_env import close_pxr, ensure_pxr, flat  # noqa: E402
+
 DEG_PER_RAD = 180.0 / math.pi          # 57.29577951308232
 
 # Attribute-name fragments we hunt for rather than importing PhysxSchema.
@@ -84,61 +87,8 @@ FRICTION_HINTS = ("jointfriction", "friction")
 
 
 def _fail(msg):
-    # pxr raises multi-line exceptions with embedded file paths and tabs. A
-    # failure message that scrolls is a failure message nobody reads.
-    flat = " ".join(str(msg).split())
-    print(f"usd_joint_report: {flat}", file=sys.stderr)
+    print(f"usd_joint_report: {flat(msg)}", file=sys.stderr)
     return 2
-
-
-_KIT_APP = None
-
-
-def ensure_pxr(via="auto"):
-    """Make `pxr` importable and say how. Returns (route, path_to_pxr).
-
-    Kit only extends sys.path once it is running, so on a machine without
-    usd-core the import cannot succeed before SimulationApp has started. That
-    is not a bug to work around; it is the load order, and pretending otherwise
-    produces a ModuleNotFoundError three call frames from anything meaningful.
-    """
-    global _KIT_APP
-
-    if via in ("auto", "direct"):
-        try:
-            import pxr
-            return "direct", getattr(pxr, "__file__", "?")
-        except ImportError:
-            if via == "direct":
-                raise RuntimeError(
-                    "no pxr, and --via direct forbids starting Kit. Install "
-                    "usd-core (x86_64 / macOS only -- there is no Linux "
-                    "aarch64 wheel), or use --via kit.")
-
-    try:
-        from isaacsim import SimulationApp
-    except ImportError:
-        raise RuntimeError(
-            "no pxr and no isaacsim either. On Spark run this with "
-            "IsaacSim/_build/linux-aarch64/release/python.sh, and "
-            "`conda deactivate` first or python.sh refuses to use its own "
-            "interpreter. Elsewhere, pip install usd-core.")
-
-    print("starting a headless SimulationApp purely to get pxr on sys.path "
-          "(about 15 s) ...", flush=True)
-    _KIT_APP = SimulationApp({"headless": True})
-    import pxr
-    return "simulation_app", getattr(pxr, "__file__", "?")
-
-
-def close_pxr():
-    global _KIT_APP
-    if _KIT_APP is not None:
-        try:
-            _KIT_APP.close()
-        except Exception:
-            pass
-        _KIT_APP = None
 
 
 def _attr(prim, name):
@@ -222,7 +172,11 @@ def _fmt_pair(v, per_deg_label, per_rad_label):
 def print_report(rep):
     print(f"=== {rep['usd']}")
     print(f"    {len(rep['joints'])} joint(s); 1 rad = {DEG_PER_RAD:.9g} deg")
-    missing = {"drive": [], "armature": [], "friction": []}
+    # "has the attribute" and "the value does anything" are different
+    # questions. The URDF-derived asset answered yes to the first and no to
+    # the second on every joint, and the first version of this summary said
+    # everything was fine.
+    missing = {"drive": [], "inert drive": [], "armature": [], "friction": []}
 
     for j in rep["joints"]:
         print()
@@ -267,29 +221,45 @@ def print_report(rep):
             mf = d["maxForce"]
             unit = "N*m" if token == "angular" else "N"
             print(f"    maxForce    {mf}  {unit}   (a force/torque: NO deg/rad conversion)")
+            if not d["stiffness"] and not d["damping"]:
+                print("    ^^ stiffness AND damping are zero: this drive cannot"
+                      " follow a target.\n       The joint is free-swinging. A"
+                      " drive that exists is not a drive that acts.")
+                missing["inert drive"].append(j["name"])
 
-        if j["armature"]:
-            for n, v in j["armature"]:
-                print(f"  armature      {v:<14.6g} kg*m^2 (no conversion)   attr {n}")
-        else:
-            print("  armature      MISSING  <- reflected rotor inertia absent;"
-                  " the joint is far easier to accelerate than the real one")
-            missing["armature"].append(j["name"])
-
-        if j["friction"]:
-            for n, v in j["friction"]:
-                print(f"  friction      {v:<14.6g} N*m    (no conversion)   attr {n}")
-        else:
-            print("  friction      MISSING")
-            missing["friction"].append(j["name"])
+        for label, pairs, unit, why in (
+                ("armature", j["armature"], "kg*m^2",
+                 "reflected rotor inertia; without it the joint is far easier"
+                 " to accelerate than the real one"),
+                ("friction", j["friction"], "N*m", "dry friction")):
+            if not pairs:
+                print(f"  {label:<13s} MISSING (no such attribute)  <- {why}")
+                missing[label].append(j["name"])
+                continue
+            for n, v in pairs:
+                if not v:
+                    print(f"  {label:<13s} 0  <- PRESENT BUT ZERO, so it has no"
+                          f" effect: {why}\n                 attr {n}")
+                    missing[label].append(j["name"])
+                else:
+                    print(f"  {label:<13s} {v:<14.6g} {unit} (no conversion)"
+                          f"   attr {n}")
 
     print()
     print("--- summary")
+    WORDING = {
+        "drive": "no drive at all on",
+        "inert drive": "drive present but stiffness AND damping are zero, so"
+                       " it cannot follow a target, on",
+        "armature": "armature absent or zero on",
+        "friction": "joint friction absent or zero on",
+    }
     for k, names in missing.items():
         if names:
-            print(f"  {k} MISSING on {len(names)}: {', '.join(names)}")
+            print(f"  {WORDING[k]} {len(names)}: {', '.join(sorted(set(names)))}")
     if not any(missing.values()):
-        print("  every joint has a drive, an armature and a friction value")
+        print("  every joint has a drive that can act, an armature and a"
+              " friction value, all non-zero")
     return missing
 
 
@@ -536,8 +506,11 @@ def main():
     rep = None
     if args.usd:
         try:
-            route, where = ensure_pxr("kit" if args.via == "kit" else args.via)
-            print(f"pxr via {route}: {where}\n")
+            route, where = ensure_pxr(args.via)
+            print(f"pxr via {route}:")
+            for w in where:
+                print(f"  {w}")
+            print()
             rep = read_usd(args.usd)
         except Exception as e:
             close_pxr()

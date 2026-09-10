@@ -154,6 +154,45 @@ Writing a radian-native MuJoCo gain straight into the USD field is a silent
 the asset under a fitted simmap: the map is pinned to joint names, types and
 limits, and if one of those moved the map quietly stops meaning what it meant.
 
+## Fixing an asset that came from a URDF
+
+URDF has no `<dynamics>`, so the importer creates the drives and the PhysX
+joint attributes and sets them all to zero -- except `maxForce`, which it takes
+from the URDF's `effort`. Measured on the asset in use, 2026-09-10:
+
+    stiffness 0   damping 0   maxForce 10   armature 0   jointFriction 0
+
+A drive whose stiffness and damping are both zero cannot follow a target: the
+joint free-swings. And `effort="10"` is three times the real STS3215's 3.35, so
+the simulated arm lifts what the real one cannot -- worse than a wrong
+trajectory, because it makes "the task succeeded" mean two different things.
+
+```sh
+python3 tools/usd_apply_mjcf_gains.py --usd old.usda --mjcf model.xml --dry-run
+python3 tools/usd_apply_mjcf_gains.py --usd old.usda --mjcf model.xml --out new.usda
+python3 tools/usd_joint_report.py --usd new.usda --mjcf model.xml
+```
+
+The check on the third line is not optional, and it is the point: the writer
+and the checker resolve the MJCF with **the same function**, so there is one
+place in this repo where a MuJoCo gain becomes a USD gain. A self-test parses
+the writer and fails if it ever grows its own angle conversion.
+
+The writer refuses to write outside the input's directory (payloads are
+referenced by relative path), refuses to touch the input, refuses prismatic
+joints, and refuses to invent an attribute name it cannot already see on the
+prim. It edits on the composed stage and exports the root layer, so the payload
+files are not modified -- the old asset stays as evidence of what was wrong.
+
+## Order of operations, and why
+
+**Fix the asset before fitting the map, not after.** Sign verification means
+watching the simulated arm turn while you move one real joint at a time
+(`arm/sim_mapping.py` cannot derive a sign; only eyes can). With
+`stiffness = 0` the simulated arm does not move at all, and `--backend echo`
+cannot stand in for it -- echo replays our own numbers, so it proves the link
+and nothing about the map.
+
 **On the Jetson** (copy `sim_limits.json` over)
 ```sh
 so101 simmap fit --arm-role leader --arm-id my_leader \

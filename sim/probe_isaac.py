@@ -15,8 +15,14 @@ Why stage `limits` does not touch Isaac
 ---------------------------------------
 Joint limits are a property of the USD file, not of the simulator, and the
 UsdPhysics schema is stable across Isaac versions in a way the Python API is
-not. So we read them with `pxr` directly: no SimulationApp, no GPU, no five
-minute startup, and nothing that changes when Isaac is upgraded.
+not. So we read them with `pxr` directly rather than through any Isaac API.
+
+** Getting pxr is the awkward part, and on Spark both obvious answers are
+** wrong: usd-core has no Linux aarch64 wheel, and python.sh on its own does
+** not provide pxr either -- there is no pxr directory in the Isaac tree until
+** Kit is running. See common/usd_env.py for the measured table. --via kit
+** starts a headless SimulationApp for about 17 s purely to get the import
+** path; --via direct refuses to.
 
 ** UsdPhysics stores revolute limits in DEGREES. ** (`physics:lowerLimit` /
 `physics:upperLimit`, UsdPhysicsRevoluteJoint.) We convert to radians here and
@@ -33,6 +39,9 @@ import json
 import math
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.usd_env import close_pxr, ensure_pxr, flat  # noqa: E402
 
 CANDIDATE_MODULES = [
     # Isaac Sim >= 4.5 layout
@@ -115,12 +124,17 @@ def stage_env(args):
 
 
 def stage_limits(args):
+    # ** The advice that used to be here was wrong on the machine this runs
+    # ** on. `python.sh` alone does NOT provide pxr on Spark -- there is no
+    # ** pxr directory in the Isaac tree at all -- and usd-core has no Linux
+    # ** aarch64 wheel. common/usd_env.py has the measured table; it starts
+    # ** Kit only if it has to.
     try:
+        route, where = ensure_pxr(args.via)
+        print(f"pxr via {route}: {', '.join(where)}")
         from pxr import Usd, UsdPhysics
     except Exception as e:
-        print(f"cannot import pxr: {type(e).__name__}: {e}")
-        print("Run this with Isaac's python (usually ./python.sh), or in an env "
-              "with usd-core installed.")
+        print(f"cannot get pxr: {flat(e)}")
         return 1
 
     stage = Usd.Stage.Open(args.usd)
@@ -223,10 +237,15 @@ def main():
     ap.add_argument("--joints", default=None,
                     help="our_name=usd_joint_name, comma separated")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--via", choices=("auto", "direct", "kit"), default="auto",
+                    help="how to get pxr for --stage limits (default auto)")
     args = ap.parse_args()
     if args.stage == "limits" and not args.usd:
         ap.error("--stage limits needs --usd")
-    return stage_env(args) if args.stage == "env" else stage_limits(args)
+    try:
+        return stage_env(args) if args.stage == "env" else stage_limits(args)
+    finally:
+        close_pxr()
 
 
 if __name__ == "__main__":
