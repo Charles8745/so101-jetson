@@ -15,6 +15,42 @@ Two safety devices live here:
 Together these cover both failure shapes; neither costs an extra bus read.
 """
 
+# ---------------------------------------------------------------------------
+# How fast the follower is allowed to move, as a SPEED.
+#
+# rate_limit() takes a limit PER STEP, but what is actually safe is a speed:
+# 8 degrees per step is 240 deg/s at 30 Hz and 960 deg/s at 120 Hz -- the same
+# number means four different machines. Every caller therefore derives its
+# per-step limit from its own loop rate, and nobody types the two numbers
+# side by side hoping to keep them consistent.
+#
+# 240 deg/s and 450 %/s are the values the station has been run at: they are
+# what `--fps 30 --max-step-deg 8` and `--fps 120 --max-step-deg 2` both mean.
+MAX_JOINT_DEG_PER_S = 240.0
+MAX_GRIPPER_PCT_PER_S = 450.0
+
+
+def step_limits_for(fps, max_step_deg=None, max_step_gripper_pct=None):
+    """Per-step limits for a loop running at `fps`, as (body_deg, gripper_pct).
+
+    Pass either override to pin it; whatever is left None is derived so that
+    the SPEED stays constant no matter what rate the loop runs at.
+
+    Returns (body_deg, gripper_pct, derived) where `derived` is the tuple of
+    names that were computed rather than given -- callers log it, so a run's
+    own record says where its limits came from.
+    """
+    if not fps or fps <= 0:
+        raise ValueError(f"fps must be positive, got {fps!r}")
+    derived = []
+    if max_step_deg is None:
+        max_step_deg = MAX_JOINT_DEG_PER_S / fps
+        derived.append("max_step_deg")
+    if max_step_gripper_pct is None:
+        max_step_gripper_pct = MAX_GRIPPER_PCT_PER_S / fps
+        derived.append("max_step_gripper_pct")
+    return max_step_deg, max_step_gripper_pct, tuple(derived)
+
 
 def _limit_for(limits, joint):
     """`limits` may be a scalar (same for every joint) or a per-joint dict.

@@ -60,7 +60,8 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from arm.control import TrackingWatchdog, pose_diff, rate_limit      # noqa: E402
+from arm.control import (MAX_JOINT_DEG_PER_S, TrackingWatchdog,      # noqa: E402
+                         pose_diff, rate_limit, step_limits_for)
 from arm.preflight import run_preflight as arm_preflight             # noqa: E402
 from arm.preflight import strip_pos                                  # noqa: E402
 from arm.units import UNITS, per_joint                               # noqa: E402
@@ -237,16 +238,19 @@ def build_args():
                     help="MJPG keeps the single USB 2.0 bus comfortable")
     ap.add_argument("--no-arm", action="store_true",
                     help="cameras only -- the old p2, for blaming a camera")
-    ap.add_argument("--arm-fps", type=float, default=60.0,
-                    help="arm loop rate, independent of the camera rate")
+    ap.add_argument("--arm-fps", type=float, default=120.0,
+                    help="arm loop rate, independent of the camera rate. 120 "
+                         "matches p1's default, or the two are not comparable")
     ap.add_argument("--leader-port", default=os.environ.get("LEADER"))
     ap.add_argument("--follower-port", default=os.environ.get("FOLLOWER"))
     ap.add_argument("--leader-id", default="my_leader")
     ap.add_argument("--follower-id", default="my_follower")
     ap.add_argument("--leader-serial", default=os.environ.get("LEADER_SERIAL"))
     ap.add_argument("--follower-serial", default=os.environ.get("FOLLOWER_SERIAL"))
-    ap.add_argument("--max-step-deg", type=float, default=8.0)
-    ap.add_argument("--max-step-gripper-pct", type=float, default=15.0)
+    ap.add_argument("--max-step-deg", type=float, default=None,
+                    help="max BODY joint move per step. Derived from --arm-fps "
+                         "to hold %g deg/s if not given" % MAX_JOINT_DEG_PER_S)
+    ap.add_argument("--max-step-gripper-pct", type=float, default=None)
     ap.add_argument("--track-tol-deg", type=float, default=25.0)
     ap.add_argument("--track-tol-gripper-pct", type=float, default=30.0)
     ap.add_argument("--track-strikes", type=int, default=15)
@@ -265,8 +269,14 @@ def build_args():
                     help="deprecated spelling of --exposure lock")
     ap.add_argument("--exposure-time", type=int, default=None)
     ap.add_argument("--white-balance", type=int, default=None)
-    ap.add_argument("--power-line-hz", type=int, default=None,
-                    choices=[0, 50, 60], help="Taiwan mains is 60")
+    # Mains frequency is a property of the ROOM, not of the run, so it belongs
+    # in devices.env with the other machine-local facts. 60 is Taiwan.
+    ap.add_argument("--power-line-hz", type=int,
+                    default=int(os.environ.get("POWER_LINE_HZ", 60)),
+                    choices=[0, 50, 60],
+                    help="mains frequency, for anti-flicker. Taiwan is 60. "
+                         "Set POWER_LINE_HZ in devices.env to change it. "
+                         "0 disables. This does NOT touch the exposure")
     ap.add_argument("--skip-preflight", action="store_true")
     return ap
 
@@ -415,8 +425,20 @@ def main():
 
     arm = None
     if use_arm:
+        # Derived from --arm-fps, not a fixed default: the limit is per STEP,
+        # so the same number is a different SPEED at every rate. p1 does the
+        # identical calculation, which is what makes the two runs comparable.
+        step_deg, step_grip, derived = step_limits_for(
+            args.arm_fps, args.max_step_deg, args.max_step_gripper_pct)
+        print(f"[p2] arm {args.arm_fps:g} Hz, limit {step_deg:g} deg/step "
+              f"({step_deg * args.arm_fps:.0f} deg/s), {step_grip:g} %/step"
+              + (f"  [{', '.join(derived)} derived from --arm-fps]" if derived
+                 else "  [given on the command line]"))
+        events.event("step_limits", arm_fps=args.arm_fps,
+                     max_step_deg=step_deg, max_step_gripper_pct=step_grip,
+                     derived=list(derived))
         arm = ArmWorker(leader, follower, args.arm_fps,
-                        per_joint(args.max_step_deg, args.max_step_gripper_pct),
+                        per_joint(step_deg, step_grip),
                         per_joint(args.track_tol_deg, args.track_tol_gripper_pct),
                         args.track_strikes, arm_rows, events, stop_evt)
         arm.start()

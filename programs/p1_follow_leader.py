@@ -32,7 +32,8 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from arm.control import TrackingWatchdog, pose_diff, rate_limit   # noqa: E402
+from arm.control import (MAX_JOINT_DEG_PER_S, TrackingWatchdog,   # noqa: E402
+                         pose_diff, rate_limit, step_limits_for)
 from arm.preflight import run_preflight, strip_pos                # noqa: E402
 from arm.units import UNITS, per_joint                             # noqa: E402
 from arm.signal_pub import SCHEMA, SignalPublisher                # noqa: E402
@@ -49,10 +50,14 @@ def build_args():
     ap.add_argument("--follower-id", default="my_follower")
     ap.add_argument("--leader-serial", default=os.environ.get("LEADER_SERIAL"))
     ap.add_argument("--follower-serial", default=os.environ.get("FOLLOWER_SERIAL"))
-    ap.add_argument("--fps", type=float, default=30.0)
-    ap.add_argument("--max-step-deg", type=float, default=8.0,
-                    help="max BODY joint move per step, vs previous command (0=off)")
-    ap.add_argument("--max-step-gripper-pct", type=float, default=15.0,
+    ap.add_argument("--fps", type=float, default=120.0,
+                    help="loop rate. 120 is what the reference numbers in "
+                         "docs/SOP.md were measured at")
+    ap.add_argument("--max-step-deg", type=float, default=None,
+                    help="max BODY joint move per step, vs previous command. "
+                         "Derived from --fps to hold %g deg/s if not given "
+                         "(0=off)" % MAX_JOINT_DEG_PER_S)
+    ap.add_argument("--max-step-gripper-pct", type=float, default=None,
                     help="same for the gripper, which is PERCENT not degrees")
     ap.add_argument("--track-tol-deg", type=float, default=25.0,
                     help="tracking-error tolerance, body joints (degrees)")
@@ -140,7 +145,19 @@ def main():
     print("\n[p1] RUNNING. Move the leader; the follower follows.")
     print("[p1] Press ENTER to stop and release torque. Ctrl+C does the same.")
 
-    step_limits = per_joint(args.max_step_deg, args.max_step_gripper_pct)
+    # Per-step limits follow from the loop rate. 8 deg/step is 240 deg/s at
+    # 30 Hz and 960 deg/s at 120 Hz, so a fixed default silently means
+    # something different at every rate -- and the dangerous end is the fast
+    # one. Overriding either flag pins it; the run's own log says which.
+    step_deg, step_grip, derived = step_limits_for(
+        args.fps, args.max_step_deg, args.max_step_gripper_pct)
+    step_limits = per_joint(step_deg, step_grip)
+    print(f"[p1] {args.fps:g} Hz, limit {step_deg:g} deg/step "
+          f"({step_deg * args.fps:.0f} deg/s), {step_grip:g} %/step"
+          + (f"  [{', '.join(derived)} derived from --fps]" if derived else
+             "  [given on the command line]"))
+    events.event("step_limits", fps=args.fps, max_step_deg=step_deg,
+                 max_step_gripper_pct=step_grip, derived=list(derived))
     track_tol = per_joint(args.track_tol_deg, args.track_tol_gripper_pct)
     watchdog = TrackingWatchdog(track_tol, args.track_strikes)
     period = 1.0 / args.fps

@@ -91,7 +91,7 @@ it turns most "it does not work" into one line.
 so101 selftest | tail -1
 ```
 
-**Expect `ALL PASS` and 28 checks.** These tests deliberately need no arm, no
+**Expect `ALL PASS` and 30 checks.** These tests deliberately need no arm, no
 camera, no lerobot and no OpenCV — they run anywhere. That is the point: if
 something later goes wrong, this tells you whether the *code* is fine, so you
 can go and look at the hardware instead.
@@ -205,11 +205,16 @@ export LEADER_SERIAL=5B79050417
 export FOLLOWER_SERIAL=5B79050450
 export CAM_WRIST=/dev/v4l/by-path/platform-3610000.usb-usb-0:2.3:1.0-video-index0
 export CAM_FRONT=/dev/v4l/by-path/platform-3610000.usb-usb-0:2.4:1.0-video-index0
+export POWER_LINE_HZ=60
 export ROTATE_FRONT=180
 ```
 
 `LEADER_SERIAL` / `FOLLOWER_SERIAL` are what arm the anti-swap check. Leave them
 out and the check passes vacuously — it will say so, but it will not stop you.
+
+`POWER_LINE_HZ=60` is Taiwan's mains. It removes the rolling bands you get
+under fluorescent light. It is a property of the room, not of the run, which is
+why it lives here — and it does **not** touch the exposure.
 
 `ROTATE_FRONT=180` is there because that camera is mounted upside down. Rotation
 is applied **in the capture thread**, so the video file and the live view get
@@ -274,16 +279,19 @@ that did not move get skipped and there is nothing to correlate.
 ## 5. Program 2 — arm and cameras together
 
 ```sh
-p2 --fourcc MJPG --width 1024 --height 768 --fps 30 --arm-fps 120 \
-   --max-step-deg 2 --max-step-gripper-pct 3.75 \
-   --power-line-hz 60 --display on --duration 60
+p2 --duration 60
 ```
 
 Cameras only:
 
 ```sh
-p2 --no-arm --power-line-hz 60 --duration 60
+p2 --no-arm --duration 60
 ```
+
+That is the whole standard run. MJPG 1024×768 at 30 fps, the arm at 120 Hz,
+the display on, the mains frequency from `devices.env` — all defaults, and all
+the same numbers §6's reference table was measured at. Drop `--duration` to run
+until you press `q` in the video window, or Enter in the terminal.
 
 Output in `logs/p2/<timestamp>/`: `<cam>.avi`, `cam_rows.jsonl`,
 `arm_rows.jsonl`, `events.jsonl`, `<cam>_faults.jsonl`, `<cam>_first.jpg`.
@@ -294,10 +302,30 @@ cameras. p2 records two *independent* streams — it does not merge them onto on
 timeline and it does not discard anything. That is p4's job, and p4 does not
 exist yet.
 
-### `--max-step-deg` must scale with `--arm-fps`
+### The step limit scales itself — do not set it by hand
 
-It is a limit **per step**, so at 120 Hz a limit of 8° is 960°/s. Keep the
-product near 240°/s: `--fps 30 → 8`, `--fps 60 → 4`, `--fps 120 → 2`.
+`--max-step-deg` is a limit **per step**, so the same number means a different
+speed at every loop rate: 8° per step is 240°/s at 30 Hz and 960°/s at 120 Hz.
+It is now derived from the rate you asked for, so the **speed** stays fixed at
+240°/s (and the gripper at 450 %/s) wherever you set `--fps`:
+
+| rate | derived limit | speed |
+|---:|---:|---:|
+| 30 Hz | 8°/step | 240°/s |
+| 60 Hz | 4°/step | 240°/s |
+| 120 Hz | 2°/step | 240°/s |
+
+p1 and p2 do the identical calculation, which is what makes their arm numbers
+comparable — that comparison is the only reason p2 exists.
+
+Both programs print the limit they arrived at and whether it was derived or
+given, and write the same into `events.jsonl`, so a run's own log says where
+its limits came from. Passing `--max-step-deg` still pins it; you then own the
+arithmetic.
+
+⚠ This used to be a fixed 8.0 in both programs. p2's old default of 60 Hz was
+therefore running at **480°/s**, twice what this section documented as safe,
+and `--arm-fps 120` without the matching `--max-step-deg 2` was four times.
 
 ### Exposure
 
@@ -306,8 +334,10 @@ white balance. That matters: V4L2 controls belong to the *camera*, not to the
 program, so a run that locked the exposure leaves it locked for every run after
 it, with nothing in the later logs to say so.
 
-`--power-line-hz 60` (Taiwan mains) removes rolling bands under fluorescent
-light. It is a separate setting and does **not** touch the exposure.
+Mains frequency comes from `POWER_LINE_HZ` in `devices.env` (60 for Taiwan) and
+removes the rolling bands you get under fluorescent light. It is a separate
+setting and does **not** touch the exposure. `--power-line-hz` overrides it for
+one run; `0` disables it.
 
 For a real dataset use `--exposure lock`. Auto exposure varies the exposure
 *time*, so the frame interval moves and the brightness drifts across a
@@ -320,6 +350,8 @@ will not survive deployment.
 ## 6. What a healthy run looks like
 
 Measured on the reference Jetson, 2026-09-09. Compare yours against these.
+These are what a bare `p1 --duration 20` and `p2 --duration 60` now produce —
+120 Hz is the default in both, so you are comparing like with like.
 
 | | reference |
 |---|---|
