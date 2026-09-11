@@ -91,7 +91,7 @@ it turns most "it does not work" into one line.
 so101 selftest | tail -1
 ```
 
-**Expect `ALL PASS` and 37 checks.** These tests deliberately need no arm, no
+**Expect `ALL PASS` and 39 checks.** These tests deliberately need no arm, no
 camera, no lerobot and no OpenCV — they run anywhere. That is the point: if
 something later goes wrong, this tells you whether the *code* is fine, so you
 can go and look at the hardware instead.

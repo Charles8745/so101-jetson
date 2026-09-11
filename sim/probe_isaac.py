@@ -41,6 +41,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from arm.units import BODY_JOINTS, GRIPPER  # noqa: E402
 from common.usd_env import close_pxr, ensure_pxr, flat  # noqa: E402
 
 CANDIDATE_MODULES = [
@@ -185,10 +186,22 @@ def stage_limits(args):
            "all_joints": rows, "dof_names": {}, "limits_rad": {},
            "gripper_rad": None}
 
-    if args.joints:
+    wanted_all = list(BODY_JOINTS) + [GRIPPER]
+    problems = []
+
+    if args.joints == "identity":
+        # Not a default: an assertion. Every name is checked below, and a
+        # missing one is an error rather than a joint quietly left unmapped.
+        want = {n: n for n in wanted_all}
+        print("\n--joints identity: the USD is asserted to name the joints "
+              "exactly as lerobot does. Each one is checked below.")
+    elif args.joints:
         want = dict(p.split("=", 1) for p in args.joints.split(","))
+    else:
+        want = None
+
+    if want is not None:
         by_name = {r["name"]: r for r in rows}
-        problems = []
         for our, theirs in want.items():
             r = by_name.get(theirs)
             if r is None:
@@ -210,22 +223,41 @@ def stage_limits(args):
                 out["gripper_rad"] = [r["lower_rad"], r["upper_rad"]]
             else:
                 out["limits_rad"][our] = [r["lower_rad"], r["upper_rad"]]
-        if problems:
-            out["problems"] = problems
-            print("\n!! this limits file is INCOMPLETE:")
-            for x in problems:
-                print("   - " + x)
-            print("   simmap_init.py will refuse a map missing any joint.")
+        for j in wanted_all:
+            if j not in want:
+                problems.append(f"{j} was not named in --joints, so it has no "
+                                f"entry in the limits file")
     else:
-        print("\nPass --joints to name which USD joint is which SO-101 joint, "
-              "e.g.\n  --joints shoulder_pan=Rotation,shoulder_lift=Pitch,"
+        problems.append(
+            "no --joints given, so limits_rad and gripper_rad are EMPTY and "
+            "this file cannot build a map")
+        print("\nPass --joints to name which USD joint is which SO-101 joint. "
+              "If the USD\nuses lerobot's own names, say so explicitly:"
+              "\n  --joints identity"
+              "\nOtherwise spell it out, e.g."
+              "\n  --joints shoulder_pan=Rotation,shoulder_lift=Pitch,"
               "elbow_flex=Elbow,wrist_flex=Wrist_Pitch,wrist_roll=Wrist_Roll,"
               "gripper=Jaw")
+
+    if problems:
+        out["problems"] = problems
+        print("\n!! this limits file is INCOMPLETE:")
+        for x in problems:
+            print("   - " + x)
 
     if args.out:
         with open(args.out, "w") as fh:
             json.dump(out, fh, indent=2)
         print(f"\nwrote {args.out}")
+
+    # ** A file that cannot build a map must not report success. ** On
+    # 2026-09-11 this returned 0 with an empty limits_rad, the caller checked
+    # only the exit code, and simmap fit then wrote a map in which all six
+    # joints were constants -- which would have driven the simulated arm to a
+    # fixed pose while every statistic stayed green.
+    if problems:
+        print("\nexit 1: the file was written, but it cannot build a map.")
+        return 1
     return 0
 
 

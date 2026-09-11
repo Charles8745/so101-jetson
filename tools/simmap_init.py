@@ -82,6 +82,25 @@ def cmd_fit(args):
     with open(args.sim_limits) as fh:
         sim = json.load(fh)
     limits = dict(sim["limits_rad"])
+
+    # ** A joint with no entry here does not get "no mapping". It gets a
+    # ** CONSTANT, and a constant mapping is a simulated arm that never moves
+    # ** while p3's every statistic stays green.
+    # On 2026-09-11 sim_limits.json was produced without --joints, so
+    # limits_rad was {}. This tool printed "-- not in the limits file --" on
+    # all five body joints, wrote the map, and exited 0. sim/probe_isaac.py's
+    # own message had promised that this tool "will refuse a map missing any
+    # joint". It did not. Now it does.
+    absent = [j for j in BODY_JOINTS if j not in limits]
+    if absent:
+        raise SystemExit(
+            f"limits file {args.sim_limits} has no entry for: "
+            f"{', '.join(absent)}.\n"
+            f"Those joints would map to a constant, which is a simulated arm "
+            f"that cannot move.\n"
+            f"Produce the file with --joints, e.g.\n"
+            f"  python3 sim/probe_isaac.py --stage limits --usd <the usd> "
+            f"--joints identity --out {args.sim_limits}")
     flip = set(x.strip() for x in (args.flip or "").split(",") if x.strip())
     unknown = flip - set(limits) - {GRIPPER}
     if unknown:
@@ -95,9 +114,15 @@ def cmd_fit(args):
     if GRIPPER in flip:
         grip = [grip[1], grip[0]]
     if grip[0] == grip[1]:
-        print("WARNING: gripper_rad is empty in the limits file -- the gripper "
-              "will map to a constant. Fill it in unless the model has no "
-              "gripper joint.")
+        if not args.no_gripper:
+            raise SystemExit(
+                f"gripper_rad is empty or degenerate in {args.sim_limits}, so "
+                f"the gripper would map to a\nconstant: 0% and 100% would "
+                f"both send the same angle, and nothing downstream\nwould "
+                f"say so. Produce the file with --joints, or pass "
+                f"--no-gripper if this\nmodel genuinely has no gripper joint.")
+        print("--no-gripper: the gripper maps to a constant ON PURPOSE. "
+              "Recorded in the map.")
 
     sim_target = {k: sim[k] for k in ("usd", "dof_names", "isaac", "stage_path")
                   if k in sim}
@@ -106,6 +131,7 @@ def cmd_fit(args):
                   source_arm={"role": args.arm_role, "id": args.arm_id,
                               "calibration_path": os.path.abspath(cal_path)})
     m.doc["fit"]["flipped"] = sorted(flip)
+    m.doc["fit"]["no_gripper"] = bool(args.no_gripper)
     m.doc["fit"]["sim_limits_file"] = os.path.abspath(args.sim_limits)
 
     print()
@@ -298,6 +324,9 @@ def main():
                         "calibrated travel onto the declared travel -- only "
                         "correct when the two denote the same physical extremes")
     f.add_argument("--out", required=True)
+    f.add_argument("--no-gripper", action="store_true",
+                   help="this model really has no gripper joint; map it to a "
+                        "constant deliberately instead of being refused")
     f.set_defaults(fn=cmd_fit)
 
     v = sub.add_parser("verify", help="record a human check")

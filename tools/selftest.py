@@ -958,6 +958,89 @@ def test_pxr_routing_refuses_clearly_when_there_is_no_pxr():
     print("ok  pxr routing refuses clearly when there is no pxr")
 
 
+
+def _simmap_cli():
+    import importlib.util
+    path = os.path.join(ROOT, "tools", "simmap_init.py")
+    spec = importlib.util.spec_from_file_location("_simmap_cli", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _fit_args(tmp, sim_limits, **kw):
+    import argparse
+    cal = os.path.join(tmp, "cal.json")
+    with open(cal, "w") as f:
+        json.dump(_fake_calibration(), f)
+    lim = os.path.join(tmp, "lim.json")
+    with open(lim, "w") as f:
+        json.dump(sim_limits, f)
+    d = dict(arm_role="leader", arm_id="my_leader", calibration=cal,
+             sim_limits=lim, flip="", fit_mode="identity",
+             out=os.path.join(tmp, "map.json"), no_gripper=False)
+    d.update(kw)
+    return argparse.Namespace(**d)
+
+
+def test_fit_refuses_limits_that_would_map_joints_to_constants():
+    """2026-09-11: sim_limits.json was produced without --joints, so its
+    limits_rad was {}. fit printed "-- not in the limits file --" for all five
+    body joints, wrote the map, and exited 0.
+
+    A joint with no entry does not get "no mapping". It gets a CONSTANT: the
+    simulated arm holds one pose while the human moves the real one, and every
+    statistic p3 reports stays green. sim/probe_isaac.py's own message had
+    promised this tool "will refuse a map missing any joint" -- the fourth time
+    in this project that a guard existed only in a message."""
+    m = _simmap_cli()
+    faithful = _faithful_limits(_fake_calibration())
+    with tempfile.TemporaryDirectory() as tmp:
+        empty = {"limits_rad": {}, "gripper_rad": None}
+        args = _fit_args(tmp, empty)
+        try:
+            m.cmd_fit(args)
+        except SystemExit as e:
+            assert "shoulder_pan" in str(e), e
+            assert "constant" in str(e), e
+        else:
+            raise AssertionError("fit accepted an empty limits file")
+        assert not os.path.exists(args.out), \
+            "fit was refused but still left a map behind"
+
+        partial = {"limits_rad": {k: v for k, v in list(faithful.items())[:2]},
+                   "gripper_rad": [-0.17, 1.74]}
+        try:
+            m.cmd_fit(_fit_args(tmp, partial))
+        except SystemExit as e:
+            assert "wrist_roll" in str(e), e
+        else:
+            raise AssertionError("fit accepted a partial limits file")
+    print("ok  fit refuses limits that would map joints to constants")
+
+
+def test_fit_refuses_a_constant_gripper_unless_told_to():
+    """0% and 100% sending the same angle is not a degenerate edge case, it is
+    a gripper that never opens. Allowed only when asked for by name."""
+    m = _simmap_cli()
+    faithful = _faithful_limits(_fake_calibration())
+    with tempfile.TemporaryDirectory() as tmp:
+        flat_grip = {"limits_rad": faithful, "gripper_rad": None}
+        try:
+            m.cmd_fit(_fit_args(tmp, flat_grip))
+        except SystemExit as e:
+            assert "gripper" in str(e), e
+        else:
+            raise AssertionError("fit accepted a constant gripper silently")
+        # ...and the deliberate case still works, and is recorded.
+        args = _fit_args(tmp, flat_grip, no_gripper=True)
+        m.cmd_fit(args)
+        with open(args.out) as f:
+            doc = json.load(f)
+        assert doc["fit"]["no_gripper"] is True, doc["fit"]
+    print("ok  fit refuses a constant gripper unless told to")
+
+
 def test_every_pasteable_command_in_the_docs_actually_parses():
     """A ```sh block in docs/ must survive being pasted into a shell.
 
@@ -1182,6 +1265,8 @@ if __name__ == "__main__":
     test_a_degree_native_mjcf_is_refused_not_guessed()
     test_the_unit_conversion_lives_in_exactly_one_place()
     test_pxr_routing_refuses_clearly_when_there_is_no_pxr()
+    test_fit_refuses_limits_that_would_map_joints_to_constants()
+    test_fit_refuses_a_constant_gripper_unless_told_to()
     test_every_pasteable_command_in_the_docs_actually_parses()
     test_the_launchers_parse_and_point_at_files_that_exist()
     print("ALL PASS")

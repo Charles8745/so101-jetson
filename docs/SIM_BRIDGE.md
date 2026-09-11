@@ -108,9 +108,21 @@ There is no reason those zeros coincide and no reason the axes agree.
 **On Spark**
 ```sh
 python3 sim/probe_isaac.py
-python3 sim/probe_isaac.py --stage limits --usd "<so101.usd>" \
-    --joints shoulder_pan="<usd_name>",shoulder_lift="<usd_name>",elbow_flex="<usd_name>",wrist_flex="<usd_name>",wrist_roll="<usd_name>",gripper="<usd_name>" \
-    --out sim_limits.json
+python3 sim/probe_isaac.py --stage limits --usd "$USD" --joints identity --out sim_limits.json
+```
+
+**`--joints` is not optional.** Without it the file is written with an empty
+`limits_rad`, and every joint would then map to a *constant* -- a simulated arm
+that holds one pose while the human moves the real one, with every statistic
+green. The probe now exits 1 when that happens and `simmap fit` refuses the
+file, but the flag is still the thing to get right.
+
+`--joints identity` asserts the USD names the joints exactly as lerobot does
+(`shoulder_pan` ... `gripper`); each name is checked and a missing one is an
+error. If the USD uses other names, spell the mapping out:
+
+```sh
+python3 sim/probe_isaac.py --stage limits --usd "$USD" --joints shoulder_pan=Rotation,shoulder_lift=Pitch,elbow_flex=Elbow,wrist_flex=Wrist_Pitch,wrist_roll=Wrist_Roll,gripper=Jaw --out sim_limits.json
 ```
 `--stage limits` reads the limits out of the **USD schema** with `pxr`, not
 through any Isaac API, so it does not depend on the Isaac version. UsdPhysics
