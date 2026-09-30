@@ -4,6 +4,17 @@ Hardware station for the SO-101 arm pair on a Jetson (or any Linux box). The
 Jetson owns the servo bus and the cameras; other machines reach the arm through
 it, so nobody else has to set hardware up from scratch.
 
+it, so nobody else has to set hardware up from scratch.
+
+> **Fork note.** This fork records the P3 bring-up on a different pair of machines
+> than the original: the simulator runs on **Windows + Isaac Sim 6.0.1**, not Spark.
+> Two things are added here — a dof-limits fix in `sim/isaac_adapter.py` for
+> Isaac 6.0.1, and `sim/so101_gui_bridge.py`, which runs the receiver inside the
+> Isaac Sim GUI when the standalone `python.bat` window renders a black viewport.
+> Setup and measurements: [docs/P3_SETUP_CARLIN.md](docs/P3_SETUP_CARLIN.md).
+
+The pluggable `env.type = real` adapter that feeds the detector / retriever /
+
 The pluggable `env.type = real` adapter that feeds the detector / retriever /
 repair pipeline lives in the MAIN repo (`vla-self-repair`) and pins a commit of
 this one. Keep the boundary: **drivers here, the pipeline seam there.**
@@ -65,6 +76,7 @@ source devices.env
 - [docs/HARDWARE.md](docs/HARDWARE.md) — measured platform facts, the single USB 2.0 bus, the wrist-cable fault
 - [docs/SIGNAL_SCHEMA.md](docs/SIGNAL_SCHEMA.md) — joint-signal format
 - [docs/SIM_BRIDGE.md](docs/SIM_BRIDGE.md) — program 3: the map, the protocol, the fault policy
+- [docs/P3_SETUP_CARLIN.md](docs/P3_SETUP_CARLIN.md) — this fork's P3 bring-up: Windows Isaac Sim 6.0.1, the USD asset, the GUI script-editor bridge, measurements
 
 ## Tests (no hardware)
 ```
@@ -78,6 +90,6 @@ python tools/loopback_test.py --sim-fps 10     # ... with a simulator that lags
 |---|---|
 | p1 | **run on hardware 2026-09-09.** 30/60/120 Hz; loop 2.7 ms; follow latency ~105 ms at 120 Hz, and it does not improve with loop rate — it is the servo, not our sampling |
 | p2 | rewritten as arm + cameras in isolated threads. Threading verified against fake devices; **not yet run on hardware** |
-| p3 | written, adversarially reviewed, tested end to end over real UDP with an echo backend. **Arm and Isaac still untested.** |
+| p3 | (Jetson + Windows RTX 4090, Isaac Sim 6.0.1). Leader map fitted and visually verified; 20 Hz, 1644/1644 acked, 0 lost, 0 superseded, sim-follow latency 33.8 ms (r ≥ 0.99). See [docs/P3_SETUP_CARLIN.md](docs/P3_SETUP_CARLIN.md). |
 | `sim/isaac_adapter.py` | written, **never run** — needs Spark's Isaac version |
 | p4, p5, gateway | not started |

@@ -1,0 +1,156 @@
+{
+  "created_unix": 1790069333.6497085,
+  "fit": {
+    "flipped": [],
+    "method": "identity",
+    "note": "fitted on the two travel extremes; the third-pose check is an INDEPENDENT verification, never refit on it",
+    "sim_limits_file": "/home/ictalab/sim_limits_win.json"
+  },
+  "joints": {
+    "elbow_flex": {
+      "clip_rad": [
+        -1.6899999498190612,
+        1.6899999498190612
+      ],
+      "fit_mode": "identity",
+      "fit_points_deg": [
+        -96.7912087912088,
+        96.7912087912088
+      ],
+      "fit_points_rad": [
+        -1.6899999498190612,
+        1.6899999498190612
+      ],
+      "mode": "affine",
+      "offset": 0.0,
+      "scale": 0.017453292519943295,
+      "span_deg_model": 193.65972900390625,
+      "span_deg_real": 193.5824175824176,
+      "span_ratio": 0.9996007873093373
+    },
+    "gripper": {
+      "clip_rad": [
+        -0.1745329917784602,
+        1.7453300509426566
+      ],
+      "dst_range_rad": [
+        -0.1745329917784602,
+        1.7453300509426566
+      ],
+      "mode": "range",
+      "src_range": [
+        0.0,
+        100.0
+      ]
+    },
+    "shoulder_lift": {
+      "clip_rad": [
+        -1.7453300509426566,
+        1.7453300509426566
+      ],
+      "fit_mode": "identity",
+      "fit_points_deg": [
+        -103.82417582417584,
+        103.82417582417584
+      ],
+      "fit_points_rad": [
+        -1.7453300509426566,
+        1.7453300509426566
+      ],
+      "mode": "affine",
+      "offset": 0.0,
+      "scale": 0.017453292519943295,
+      "span_deg_model": 200.00009155273438,
+      "span_deg_real": 207.64835164835168,
+      "span_ratio": 1.0382412829726164
+    },
+    "shoulder_pan": {
+      "clip_rad": [
+        -1.9198600466648905,
+        1.9198600466648905
+      ],
+      "fit_mode": "identity",
+      "fit_points_deg": [
+        -118.63736263736264,
+        118.63736263736264
+      ],
+      "fit_points_rad": [
+        -1.9198600466648905,
+        1.9198600466648905
+      ],
+      "mode": "affine",
+      "offset": 0.0,
+      "scale": 0.017453292519943295,
+      "span_deg_model": 219.999755859375,
+      "span_deg_real": 237.27472527472528,
+      "span_ratio": 1.0785226753905697
+    },
+    "wrist_flex": {
+      "clip_rad": [
+        -1.6580599930754685,
+        1.6580599930754685
+      ],
+      "fit_mode": "identity",
+      "fit_points_deg": [
+        -102.02197802197803,
+        102.02197802197803
+      ],
+      "fit_points_rad": [
+        -1.6580599930754685,
+        1.6580599930754685
+      ],
+      "mode": "affine",
+      "offset": 0.0,
+      "scale": 0.017453292519943295,
+      "span_deg_model": 189.9996795654297,
+      "span_deg_real": 204.04395604395606,
+      "span_ratio": 1.0739173692852992
+    },
+    "wrist_roll": {
+      "clip_rad": [
+        -2.743850077418677,
+        2.841209920549794
+      ],
+      "fit_mode": "identity",
+      "fit_points_deg": [
+        -180.0,
+        180.0
+      ],
+      "fit_points_rad": [
+        -2.743850077418677,
+        2.841209920549794
+      ],
+      "mode": "affine",
+      "offset": 0.04867992156555845,
+      "scale": 0.017453292519943295,
+      "span_deg_model": 320.0003662109375,
+      "span_deg_real": 360.0,
+      "span_ratio": 1.1249987125411463
+    }
+  },
+  "schema": "so101.simmap.v1",
+  "sim_target": {
+    "dof_names": {
+      "elbow_flex": "elbow_flex",
+      "gripper": "gripper",
+      "shoulder_lift": "shoulder_lift",
+      "shoulder_pan": "shoulder_pan",
+      "wrist_flex": "wrist_flex",
+      "wrist_roll": "wrist_roll"
+    },
+    "usd": "C:\\so101_usd\\so101_new_calib\\new.usda"
+  },
+  "source_arm": {
+    "calibration_path": "/home/ictalab/.cache/huggingface/lerobot/calibration/teleoperators/so_leader/my_leader.json",
+    "id": "my_leader",
+    "role": "leader"
+  },
+  "source_calibration_sha256": "788a674aefa6c225b5afa69eb7d3a31b77950b2993ce36cb4349d64f81b1eba1",
+  "verified": {
+    "by": "Carlin",
+    "fit_sha256": "171afe593603e76ab7c5636e03ba15a05b2384d394bac653ee7259c094ecb52e",
+    "method": "visual",
+    "note": "2026-09-23 \u9010\u4e00\u79fb\u52d5 6 \u95dc\u7bc0\uff0c\u865b\u64ec\u624b\u81c2\u65b9\u5411\u8207\u5e45\u5ea6\u4e00\u81f4\uff08Isaac GUI \u6a4b\u63a5\uff09",
+    "when_unix": 1790149890.297199
+  }
+}

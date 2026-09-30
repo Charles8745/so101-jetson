@@ -5,3 +5,4 @@ recordings/
 *.mp4
 devices.env
 *.log
+logs/
